@@ -130,14 +130,13 @@ BarWidget {
     return lines.join("\n")
   }
 
-  // ---- Panel groundwork (Task 7 supplies Panel.qml).
+  // ---- Panel wiring.
   //
-  // The loader is wired but parked: pointing it at a file that does not exist
-  // yet would spray QML errors into the shell log on every reload. Task 7
-  // flips `active` to true and drops Panel.qml in beside this file; every
-  // accessor below already guards on `panelLoader.item`, so nothing else here
-  // needs to change. Shape contract for shell.summon/hide/toggle routing:
-  // Bar.findPanelWidget requires open/close/opened on the bar-widget root.
+  // Panel.qml is loaded lazily, the way the built-in weather/clock plugins do
+  // it, and every accessor below guards on `panelLoader.item` so the chip keeps
+  // working if the panel ever fails to load. Shape contract for
+  // shell.summon/hide/toggle routing: Bar.findPanelWidget requires
+  // open/close/opened on the bar-widget root.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
   function open() {
@@ -177,7 +176,7 @@ BarWidget {
 
   Loader {
     id: panelLoader
-    active: false                       // Task 7: set true alongside Panel.qml
+    active: true
     source: active ? Qt.resolvedUrl("Panel.qml") : ""
     visible: false
     onLoaded: {
