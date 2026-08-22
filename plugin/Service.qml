@@ -15,6 +15,10 @@ Item {
   id: root
 
   // deps | no-tokens | auth-expired | offline | api-error | stale | live | loading
+  //
+  // Deliberately shadows Item.state. Nothing here uses QML states or
+  // transitions, and "state" is the name the panel and chip both want to bind;
+  // renaming it now would ripple through both for no gain.
   property string state: "loading"
 
   // Last payload we were happy with, kept across later failures so an offline
@@ -23,6 +27,13 @@ Item {
 
   property string lastError: ""
   property int pollMinutes: 30
+
+  // Gate the owner can use to decide, at each tick, whether this instance is
+  // allowed to spawn the helper. The bar builds one widget per screen, and
+  // three monitors should not mean three Garmin API clients. Checked at fire
+  // time rather than bound once, so unplugging the primary screen's bar
+  // silently promotes whoever is left instead of stopping the polling.
+  property var canPoll: function () { return true }
 
   // Every error code the helper is allowed to emit. Anything outside this set
   // is a helper we do not understand, which is an api-error by definition.
@@ -37,6 +48,16 @@ Item {
     decodeURIComponent(String(Qt.resolvedUrl("bin/garmin-widget")).replace(/^file:\/\//, ""))
 
   signal refreshed()
+
+  function poll() {
+    var allowed = true
+    try {
+      allowed = root.canPoll()
+    } catch (e) {
+      allowed = true
+    }
+    if (allowed) root.refresh()
+  }
 
   function refresh() {
     if (fetchProcess.running) return
@@ -81,6 +102,15 @@ Item {
     root.refreshed()
   }
 
+  // Take a result the primary instance already paid for. Deliberately silent —
+  // emitting `refreshed()` here would bounce the payload straight back out
+  // through the publisher and loop the bar.
+  function adopt(state, data, lastError) {
+    root.data = data
+    root.state = String(state)
+    root.lastError = String(lastError || "")
+  }
+
   property string _stdout: ""
 
   Process {
@@ -89,7 +119,10 @@ Item {
     command: []
     stdout: StdioCollector { id: fetchStdout; waitForEnd: true; onStreamFinished: root._stdout = text }
     onExited: {
+      var timedOut = watchdog.tripped
       watchdog.stop()
+      watchdog.tripped = false
+      if (timedOut) return  // the watchdog already recorded the failure
       root.applyPayload(String(fetchStdout.text || root._stdout || ""))
     }
   }
@@ -99,9 +132,17 @@ Item {
   // it loose leaves the last good data on screen and lets the next tick try.
   Timer {
     id: watchdog
+    property bool tripped: false
     interval: 45000
     repeat: false
-    onTriggered: if (fetchProcess.running) fetchProcess.running = false
+    onTriggered: {
+      if (!fetchProcess.running) return
+      watchdog.tripped = true
+      fetchProcess.running = false
+      // Named explicitly rather than left to onExited's empty stdout, so the
+      // tooltip says "timed out" instead of "unparseable helper output".
+      root.fail("api-error", "helper timed out")
+    }
   }
 
   Timer {
@@ -111,8 +152,18 @@ Item {
     interval: Math.max(5, Number(root.pollMinutes) || 30) * 60 * 1000
     running: true
     repeat: true
-    onTriggered: root.refresh()
+    onTriggered: root.poll()
   }
 
-  Component.onCompleted: root.refresh()
+  // The bar registers its widgets a moment after they finish constructing, so
+  // an immediate first poll would run before `canPoll()` can tell primary from
+  // secondary — and every screen would fetch once. A short delay costs nothing
+  // on a 30-minute cycle and makes the very first tick honour the gate too.
+  Timer {
+    id: startupTimer
+    interval: 1500
+    repeat: false
+    running: true
+    onTriggered: root.poll()
+  }
 }

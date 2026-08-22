@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 def _home() -> Path:
@@ -99,12 +100,35 @@ def cmd_fetch() -> int:
         return emit({"ok": False,
                      "error": "offline" if offline else "api-error",
                      "detail": str(e)[:200]})
+    _write_cache(payload)
+    return emit(payload)
+
+def _write_cache(payload) -> None:
+    """Replace the cache atomically, or not at all.
+
+    A torn write is worse than a missing cache: the next offline fetch would
+    read half a JSON object, fall through to the generic error branch, and the
+    bar would blank instead of showing yesterday's numbers. Writing a sibling
+    temp file and os.replace()ing it means readers only ever see a whole file.
+    Still best-effort overall — a full or read-only disk must not break fetch.
+    """
+    tmp = None
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(payload))
+        fd, tmp = tempfile.mkstemp(dir=str(CACHE_PATH.parent),
+                                   prefix=".last-", suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, CACHE_PATH)  # same directory, so this is atomic
+        tmp = None
     except Exception:
         pass  # cache write is best-effort; must never break fetch
-    return emit(payload)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
 def cmd_login() -> int:
     if not HAS_GARMINCONNECT:
