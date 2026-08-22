@@ -106,8 +106,28 @@ def cmd_fetch() -> int:
         pass  # cache write is best-effort; must never break fetch
     return emit(payload)
 
-def cmd_login() -> int:  # implemented in Task 5
-    return emit({"ok": False, "error": "api-error", "detail": "not implemented"})
+def cmd_login() -> int:
+    if not HAS_GARMINCONNECT:
+        return emit({"ok": False, "error": "deps",
+                     "hint": "pip install garminconnect (or pipx)"})
+    import getpass
+    import garminconnect as gc
+    # Interactive prompts go to stderr so stdout stays JSON-only.
+    print("Garmin Connect login (credentials go to Garmin only, "
+          "tokens stay local).", file=sys.stderr)
+    email = input("Email: ")
+    password = getpass.getpass("Password: ")
+    try:
+        g = gc.Garmin(email=email, password=password,
+                      prompt_mfa=lambda: input("MFA code: "))
+        g.login()
+        TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        g.client.dump(str(TOKENS_PATH))
+        TOKENS_PATH.chmod(0o600)
+    except Exception as e:
+        return emit({"ok": False, "error": "auth-expired",
+                     "detail": str(e)[:200]})
+    return emit({"ok": True, "tokens": str(TOKENS_PATH)})
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
