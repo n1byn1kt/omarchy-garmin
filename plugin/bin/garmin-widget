@@ -115,11 +115,17 @@ def cmd_login() -> int:
     # Interactive prompts go to stderr so stdout stays JSON-only.
     print("Garmin Connect login (credentials go to Garmin only, "
           "tokens stay local).", file=sys.stderr)
-    email = input("Email: ")
+    print("Email: ", end="", file=sys.stderr, flush=True)
+    email = input()
     password = getpass.getpass("Password: ")
+
+    def _prompt_mfa():
+        print("MFA code: ", end="", file=sys.stderr, flush=True)
+        return input()
+
     try:
         g = gc.Garmin(email=email, password=password,
-                      prompt_mfa=lambda: input("MFA code: "))
+                      prompt_mfa=_prompt_mfa)
         g.login()
         TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
         g.client.dump(str(TOKENS_PATH))
