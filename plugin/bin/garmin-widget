@@ -99,8 +99,11 @@ def cmd_fetch() -> int:
         return emit({"ok": False,
                      "error": "offline" if offline else "api-error",
                      "detail": str(e)[:200]})
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(json.dumps(payload))
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(json.dumps(payload))
+    except Exception:
+        pass  # cache write is best-effort; must never break fetch
     return emit(payload)
 
 def cmd_login() -> int:  # implemented in Task 5

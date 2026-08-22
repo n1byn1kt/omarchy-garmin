@@ -97,3 +97,15 @@ def test_fetch_transient_error_no_cache(home, fake_garmin, capsys):
     _with_tokens(mod)
     rc, out = run(mod, ["fetch"], capsys)
     assert out["ok"] is False and out["error"] == "offline"
+
+
+def test_fetch_cache_write_failure_is_nonfatal(home, fake_garmin, capsys):
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    mod = load_helper()
+    _with_tokens(mod)
+    # Make CACHE_PATH unwritable by pre-creating it as a directory.
+    mod.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CACHE_PATH.mkdir()
+    rc, out = run(mod, ["fetch"], capsys)
+    assert rc == 0
+    assert out["ok"] is True and out["stale"] is False
