@@ -32,7 +32,26 @@ BarWidget {
     onRefreshed: root.publish()
   }
 
+  // ---- On-demand refresh
+  //
+  // A refresh request is an *intent*, not a fetch. Every entry point — the
+  // chip's middle click, the panel's Refresh button, `qs ipc call garmin
+  // refresh` — goes through requestRefresh(), which fans the intent out to
+  // every instance of this widget; only the primary acts on it, and it then
+  // publishes the payload to its peers exactly as it does for a poll. Without
+  // that guard, three monitors meant three helper processes and three Garmin
+  // sessions per click, and the two extra results were thrown away.
+  //
+  // On a single screen the fan-out is a list of one, so the primary handles
+  // its own request directly and nothing about the behaviour changes.
+  function requestRefresh() {
+    root.broadcast("refresh")
+  }
+
+  // The broadcast target. Named `refresh` because that is the string
+  // BarWidget.broadcast() looks up on each peer.
   function refresh() {
+    if (!root.isPrimaryInstance()) return
     service.refresh()
   }
 
@@ -188,7 +207,7 @@ BarWidget {
   IpcHandler {
     target: "garmin"
 
-    function refresh(): void { root.broadcast("refresh") }
+    function refresh(): void { root.requestRefresh() }
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
@@ -210,7 +229,7 @@ BarWidget {
     verticalPadding: 8.75
 
     onPressed: function(b) {
-      if (b === Qt.MiddleButton) root.broadcast("refresh")
+      if (b === Qt.MiddleButton) root.requestRefresh()
       else root.togglePanel()
     }
 

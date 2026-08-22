@@ -53,8 +53,14 @@ Panel {
     return false
   }
 
+  // Refreshing goes through the bar widget, not straight at the Service: on a
+  // multi-monitor bar this panel's Service is whichever screen's instance
+  // happens to own it, and asking it directly would spawn a helper on a
+  // non-primary instance whose result nobody ever publishes. requestRefresh()
+  // routes the intent to the primary, which fans the payload back out.
   function refresh() {
-    if (root.service && typeof root.service.refresh === "function") root.service.refresh()
+    if (root.hostWidget && typeof root.hostWidget.requestRefresh === "function") root.hostWidget.requestRefresh()
+    else if (root.service && typeof root.service.refresh === "function") root.service.refresh()
   }
 
   // Opening the panel is a request to look at today's numbers, so a broken or
@@ -159,8 +165,10 @@ Panel {
     if (s === "") return ""
     var m = s.match(/(\d{1,2}):(\d{2})/)
     if (m) return ("0" + m[1]).slice(-2) + ":" + m[2]
-    var d = new Date(s)
-    return isNaN(d.getTime()) ? s : Qt.formatDateTime(d, "HH:mm")
+    // No clock in the string, so show it verbatim. Handing it to `new Date()`
+    // instead would parse a date-only stamp fine and render a confident,
+    // entirely invented "00:00".
+    return s
   }
 
   property bool copied: false
@@ -257,8 +265,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    // Wide enough for the full helper path on two lines rather than three;
-    // fittedContentWidth still shrinks it on a narrow screen.
+    // Wide enough that the full helper path wraps at its own slashes rather
+    // than mid-word; it still takes three lines. fittedContentWidth shrinks
+    // this further on a narrow screen.
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
@@ -328,7 +337,9 @@ Panel {
               implicitHeight: commandText.implicitHeight + Style.spacing.controlPaddingY * 2
               height: implicitHeight
               radius: Style.cornerRadius
-              color: Style.normalFill
+              // Off the bar's own colours, not the global tokens, so a
+              // recoloured bar carries through to the command strip.
+              color: Style.normalFillFor(root.foreground, root.accentColor, root.urgentColor)
               borderSpec: Border.controlSpec("normal", root.foreground, root.accentColor)
 
               Text {
@@ -492,7 +503,9 @@ Panel {
                   height: parent.height
                   radius: parent.radius
                   color: root.showStale ? root.dim : root.accentColor
-                  Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                  // No width Behavior here: `detailRows` is rebuilt whenever any
+                  // value changes, so the Repeater recreates this delegate and
+                  // an animation would never have an old width to run from.
                 }
               }
             }
@@ -521,7 +534,11 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: "Refresh"
+            // Ui/Button paints `enabled` nowhere, so dim it by hand — otherwise
+            // a fetch already in flight looks like a button that ignored you.
             enabled: !root.busy
+            opacity: root.busy ? 0.45 : 1.0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
             foreground: root.foreground
             accent: root.accentColor
             fontFamily: root.fontFamily
