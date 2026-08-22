@@ -65,6 +65,12 @@ def build_payload(summary, sleep, as_of):
         "restingHr": summary.get("restingHeartRate"),
     }
 
+def _load_cache():
+    try:
+        return json.loads(CACHE_PATH.read_text())
+    except Exception:
+        return None
+
 def cmd_fetch() -> int:
     if not HAS_GARMINCONNECT:
         return emit({"ok": False, "error": "deps",
@@ -75,10 +81,24 @@ def cmd_fetch() -> int:
     import garminconnect as gc
     today = datetime.date.today().isoformat()
     now = datetime.datetime.now().isoformat(timespec="minutes")
-    g = gc.Garmin()
-    g.login(tokenstore=str(TOKENS_PATH))
-    payload = build_payload(g.get_user_summary(today) or {},
-                            g.get_sleep_data(today) or {}, now)
+    try:
+        g = gc.Garmin()
+        g.login(tokenstore=str(TOKENS_PATH))
+        payload = build_payload(g.get_user_summary(today) or {},
+                                g.get_sleep_data(today) or {}, now)
+    except gc.GarminConnectAuthenticationError:
+        return emit({"ok": False, "error": "auth-expired",
+                     "hint": "run: garmin-widget login"})
+    except Exception as e:
+        cached = _load_cache()
+        if cached is not None:
+            cached["stale"] = True
+            return emit(cached)
+        offline = (isinstance(e, (ConnectionError, OSError, TimeoutError))
+                   or "Connection" in type(e).__name__)
+        return emit({"ok": False,
+                     "error": "offline" if offline else "api-error",
+                     "detail": str(e)[:200]})
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps(payload))
     return emit(payload)

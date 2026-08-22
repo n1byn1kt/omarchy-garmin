@@ -67,3 +67,33 @@ def test_fetch_writes_cache(home, fake_garmin, capsys):
     run(mod, ["fetch"], capsys)
     import json as j
     assert j.loads(mod.CACHE_PATH.read_text())["ok"] is True
+
+
+def test_fetch_auth_expired(home, fake_garmin, capsys):
+    from conftest import AuthError
+    fake_garmin.login_exc = AuthError("expired")
+    mod = load_helper()
+    _with_tokens(mod)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out == {"ok": False, "error": "auth-expired",
+                   "hint": "run: garmin-widget login"}
+
+
+def test_fetch_transient_error_serves_stale_cache(home, fake_garmin, capsys):
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    mod = load_helper()
+    _with_tokens(mod)
+    run(mod, ["fetch"], capsys)          # seed cache
+    fake_garmin.login_exc = ConnectionError("boom")
+    mod2 = load_helper()
+    rc, out = run(mod2, ["fetch"], capsys)
+    assert out["ok"] is True and out["stale"] is True
+    assert out["bodyBattery"]["current"] == 61
+
+
+def test_fetch_transient_error_no_cache(home, fake_garmin, capsys):
+    fake_garmin.login_exc = ConnectionError("boom")
+    mod = load_helper()
+    _with_tokens(mod)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is False and out["error"] == "offline"
