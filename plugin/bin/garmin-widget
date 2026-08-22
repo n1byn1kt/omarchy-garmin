@@ -5,6 +5,7 @@ Contract: every subcommand prints exactly one JSON object to stdout and
 exits 0. Errors are data: {"ok": false, "error": "<category>"} with
 category in: deps | no-tokens | auth-expired | offline | api-error.
 """
+import datetime
 import json
 import os
 import sys
@@ -40,8 +41,47 @@ def main(argv) -> int:
         return cmd_login()
     return emit({"ok": False, "error": "api-error", "detail": f"unknown command {cmd!r}"})
 
-def cmd_fetch() -> int:  # implemented in Task 3
-    return emit({"ok": False, "error": "api-error", "detail": "not implemented"})
+def _get(d, *keys):
+    for k in keys:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+def build_payload(summary, sleep, as_of):
+    dto = _get(sleep, "dailySleepDTO") or {}
+    secs = dto.get("sleepTimeSeconds")
+    return {
+        "ok": True, "stale": False, "asOf": as_of,
+        "bodyBattery": {
+            "current": summary.get("bodyBatteryMostRecentValue"),
+            "high": summary.get("bodyBatteryHighestValue"),
+            "low": summary.get("bodyBatteryLowestValue"),
+        },
+        "sleep": {
+            "score": _get(dto, "sleepScores", "overall", "value"),
+            "durationMin": round(secs / 60) if secs else None,
+        },
+        "steps": {"count": summary.get("totalSteps"),
+                  "goal": summary.get("dailyStepGoal")},
+        "restingHr": summary.get("restingHeartRate"),
+    }
+
+def cmd_fetch() -> int:
+    if not HAS_GARMINCONNECT:
+        return emit({"ok": False, "error": "deps",
+                     "hint": "pip install garminconnect (or pipx)"})
+    if not TOKENS_PATH.exists():
+        return emit({"ok": False, "error": "no-tokens",
+                     "hint": "run: garmin-widget login"})
+    import garminconnect as gc
+    today = datetime.date.today().isoformat()
+    now = datetime.datetime.now().isoformat(timespec="minutes")
+    g = gc.Garmin()
+    g.login(tokenstore=str(TOKENS_PATH))
+    payload = build_payload(g.get_user_summary(today) or {},
+                            g.get_sleep_data(today) or {}, now)
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(payload))
+    return emit(payload)
 
 def cmd_login() -> int:  # implemented in Task 5
     return emit({"ok": False, "error": "api-error", "detail": "not implemented"})
