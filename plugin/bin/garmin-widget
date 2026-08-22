@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""garmin-widget — Garmin Connect helper for the io.github.n1byn1kt.garmin Omarchy plugin.
+
+Contract: every subcommand prints exactly one JSON object to stdout and
+exits 0. Errors are data: {"ok": false, "error": "<category>"} with
+category in: deps | no-tokens | auth-expired | offline | api-error.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+def _home() -> Path:
+    return Path(os.environ.get("HOME", str(Path.home())))
+
+# Recomputed at import so tests can swap $HOME per-test via load_helper().
+TOKENS_PATH = _home() / ".config" / "garmin-widget" / "tokens.json"
+CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
+
+try:
+    import garminconnect  # noqa: F401
+    HAS_GARMINCONNECT = True
+except Exception:
+    HAS_GARMINCONNECT = False
+
+def emit(obj) -> int:
+    print(json.dumps(obj))
+    return 0
+
+def cmd_status() -> int:
+    return emit({"ok": True, "deps": HAS_GARMINCONNECT, "tokens": TOKENS_PATH.exists()})
+
+def main(argv) -> int:
+    cmd = argv[0] if argv else "fetch"
+    if cmd == "status":
+        return cmd_status()
+    if cmd == "fetch":
+        return cmd_fetch()
+    if cmd == "login":
+        return cmd_login()
+    return emit({"ok": False, "error": "api-error", "detail": f"unknown command {cmd!r}"})
+
+def cmd_fetch() -> int:  # implemented in Task 3
+    return emit({"ok": False, "error": "api-error", "detail": "not implemented"})
+
+def cmd_login() -> int:  # implemented in Task 5
+    return emit({"ok": False, "error": "api-error", "detail": "not implemented"})
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
