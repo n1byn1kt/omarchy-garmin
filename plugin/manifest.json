@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.n1byn1kt.garmin",
+  "name": "Garmin",
+  "version": "0.1.0",
+  "author": "jfk",
+  "description": "Today's Garmin health at a glance: Body Battery in the bar; sleep score, steps, and resting heart rate in a click panel.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Garmin",
+    "description": "Body Battery chip — click for sleep, steps, and resting HR",
+    "category": "Health",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "pollMinutes": 30,
+      "showSteps": false,
+      "stepsGoalFallback": 10000
+    },
+    "schema": [
+      { "key": "pollMinutes", "type": "number", "label": "Refresh interval (minutes)" },
+      { "key": "showSteps", "type": "boolean", "label": "Show steps next to Body Battery" },
+      { "key": "stepsGoalFallback", "type": "number", "label": "Step goal if Garmin doesn't provide one" }
+    ]
+  }
+}
