@@ -86,7 +86,7 @@ Python, so the helper uses a **dedicated virtualenv** it knows how to find:
 
 ```bash
 python3 -m venv ~/.local/share/garmin-widget/venv
-~/.local/share/garmin-widget/venv/bin/pip install garminconnect
+~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11
 ```
 
 Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
@@ -171,8 +171,8 @@ single-monitor setup; multi-monitor reports welcome.)
 ## Privacy
 
 Your credentials go to Garmin only. Tokens are stored locally in
-`~/.config/garmin-widget/` with 0600 permissions. The widget makes one outbound
-connection — to Garmin Connect — and contains no telemetry.
+`~/.config/garmin-widget/` with 0600 permissions. The widget connects to Garmin
+Connect only — no telemetry, no other hosts.
 
 Everything this plugin writes lives under your home directory:
 
@@ -256,7 +256,8 @@ in `bin/garmin-widget`. The helper's contract is that every
 subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.
 
-Design notes and the implementation plan are in [`docs/`](docs/).
+The Python side is covered by a pytest suite under `tests/`, run with
+`python -m pytest` from the repo root.
 
 ## License
 

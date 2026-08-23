@@ -1,6 +1,5 @@
 .superpowers/
 __pycache__/
 .pytest_cache/
-docs/plan.md
-docs/design.md
+docs/*.md
 grok-*.txt

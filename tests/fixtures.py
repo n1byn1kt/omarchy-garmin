@@ -1,7 +1,7 @@
-"""Sanitized copies of the real garminconnect 0.3.11 response shapes.
+"""Response shapes for garminconnect 0.3.11.
 
-Captured from a live account on 2026-08-22 and then scrubbed: no account or
-device ids, no owner names or profile URLs, no GPS coordinates. Values are
+Modeled on real Garmin Connect response shapes; values synthesized. No account
+or device ids, no owner names or profile URLs, no GPS coordinates. Values are
 kept realistic (and the array column layouts kept exactly) because the whole
 point of these fixtures is that the parsing code is written against what the
 API actually returns, not against what the docs imply.
@@ -21,8 +21,8 @@ def _row(i, val, step_min=3):
 # markers, not a curve).
 BODY_BATTERY = [{
     "date": "2026-08-22",
-    "charged": 63,
-    "drained": 52,
+    "charged": 58,
+    "drained": 47,
     "startTimestampLocal": "2026-08-22T00:00:00.0",
     "endTimestampLocal": "2026-08-22T20:03:00.0",
     "bodyBatteryValueDescriptorDTOList": [
@@ -32,8 +32,8 @@ BODY_BATTERY = [{
          "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"},
     ],
     "bodyBatteryValuesArray": [
-        [T0, 11], [T0 + 23940000, 64], [T0 + 29880000, 74],
-        [T0 + 47700000, 56], [T0 + 48240000, 55], [T0 + 70740000, 22],
+        [T0, 14], [T0 + 23940000, 61], [T0 + 29880000, 77],
+        [T0 + 47700000, 53], [T0 + 48240000, 52], [T0 + 70740000, 25],
     ],
 }]
 
@@ -75,14 +75,14 @@ STRESS = {
 HRV = {
     "hrvSummary": {
         "calendarDate": "2026-08-22",
-        "weeklyAvg": 47,
-        "lastNightAvg": 55,
-        "lastNight5MinHigh": 79,
-        "baseline": {"lowUpper": 42, "balancedLow": 46, "balancedUpper": 65},
+        "weeklyAvg": 44,
+        "lastNightAvg": 58,
+        "lastNight5MinHigh": 82,
+        "baseline": {"lowUpper": 40, "balancedLow": 44, "balancedUpper": 63},
         "status": "BALANCED",
         "feedbackPhrase": "HRV_BALANCED_8",
     },
-    "hrvReadings": [{"hrvValue": 26, "readingTimeLocal": "2026-08-21T23:21:47.0"}],
+    "hrvReadings": [{"hrvValue": 29, "readingTimeLocal": "2026-08-21T23:21:47.0"}],
 }
 
 # --- get_training_readiness(today) -------------------------------------------
@@ -90,10 +90,10 @@ HRV = {
 READINESS = [{
     "calendarDate": "2026-08-22",
     "level": "MODERATE",
-    "score": 50,
-    "sleepScore": 48,
+    "score": 54,
+    "sleepScore": 52,
     "feedbackShort": "BOOSTED_BY_LIGHTER_TRAINING",
-    "recoveryTime": 174,
+    "recoveryTime": 160,
 }]
 
 # --- get_intensity_minutes_data(today) ---------------------------------------
@@ -115,11 +115,7 @@ INTENSITY = {
 # nothing from this dict reaches the payload except type/duration/distance/date.
 LAST_ACTIVITY = {
     "activityType": {"typeId": 3, "typeKey": "hiking", "parentTypeId": 17},
-    "startTimeLocal": "2026-06-20 11:34:23",
-    "distance": 11949.6904296875,
-    "duration": 6398.03515625,
-    "elevationGain": 212.0,
-    "calories": 681.0,
-    "averageHR": 111.0,
-    "steps": 10186,
+    "startTimeLocal": "2026-01-15",
+    "distance": 12000.0,
+    "duration": 6400.0,
 }

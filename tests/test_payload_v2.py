@@ -29,24 +29,24 @@ def test_extra_metrics_from_real_shapes(home, fake_garmin, capsys):
     _all_endpoints(fake_garmin)
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True
-    assert out["hrvStatus"] == {"lastNightAvg": 55, "weeklyAvg": 47,
+    assert out["hrvStatus"] == {"lastNightAvg": 58, "weeklyAvg": 44,
                                 "status": "BALANCED"}
-    assert out["readiness"] == {"score": 50, "level": "MODERATE"}
+    assert out["readiness"] == {"score": 54, "level": "MODERATE"}
     assert out["intensityMinutes"] == {"weekly": 21, "goal": 150}
     assert out["lastActivity"] == {"type": "hiking", "durationMin": 107,
-                                   "distanceKm": 11.95, "date": "2026-06-20"}
+                                   "distanceKm": 12.0, "date": "2026-01-15"}
 
 
 def test_last_activity_carries_no_coordinates_or_ids(home, fake_garmin, capsys):
     _all_endpoints(fake_garmin)
     fake_garmin.last_activity = dict(fixtures.LAST_ACTIVITY,
                                      startLatitude=12.34, startLongitude=-56.78,
-                                     activityId=23321512073, ownerFullName="Someone")
+                                     activityId=99999999999, ownerFullName="Someone")
     out = _fetch(load_helper(), capsys)
     assert set(out["lastActivity"]) == {"type", "durationMin", "distanceKm", "date"}
     blob = json.dumps(out)
     assert "12.34" not in blob and "ownerFullName" not in blob
-    assert "23321512073" not in blob
+    assert "99999999999" not in blob
 
 
 def test_floors_and_calories_come_from_the_existing_summary(home, fake_garmin, capsys):
@@ -79,7 +79,7 @@ def test_one_failing_endpoint_nulls_only_its_key(home, fake_garmin, capsys):
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True and out["stale"] is False
     assert out["hrvStatus"] is None
-    assert out["readiness"] == {"score": 50, "level": "MODERATE"}
+    assert out["readiness"] == {"score": 54, "level": "MODERATE"}
     assert "user@example.com" not in json.dumps(out)
 
 
