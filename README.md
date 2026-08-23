@@ -27,28 +27,40 @@ and the timestamp.
 **In the panel** — a stack of cards, in the order `panelMetrics` asks for them:
 the day's Body Battery and stress curve, sleep score and duration, steps against
 your Garmin step goal, training readiness, resting HR, and more (full list under
-[Settings](#settings)). Cards carry a seven-day strip and a `↗ ↘ →` delta where
-the cache has the history for it, plus a footer timestamp and a Refresh button.
+[Settings](#settings)). A seven-day strip is drawn on the battery, sleep and
+steps cards; a `↗ ↘ →` delta is drawn on sleep, steps and resting HR. The rest
+of the cards (curve, readiness, HRV, intensity, floors, calories, activity,
+custom) show a figure only. Every card gets a footer timestamp and a Refresh
+button.
 The pencil in the header rearranges the whole deck without leaving the panel —
 see [Rearranging the cards](#rearranging-the-cards-from-the-panel).
 
-Deltas and strips compare the **two newest days in the local cache**, which is
-normally today against yesterday. They are drawn from cached history, not from
-the live fetch, so a stale payload still shows you a real comparison — just an
-older one; the footer's `· stale` is what tells you so.
+Deltas compare the **two newest cached entries that actually have that
+field**, which is normally today against yesterday — but skips a day the
+field is missing from rather than comparing against it. No arrow is shown if
+those two entries are more than two days apart; an arrow against a reading
+from last week is not a trend. Deltas and strips are drawn from cached
+history, not from the live fetch, so a stale payload still shows you a real
+comparison — just an older one; the footer's `· stale` is what tells you so.
+Before your watch has synced for the day, today's own figures show `—`, while
+the seven-day strips keep drawing from cache as usual.
 
 **Interactions**
 
 | Action | Result |
 |---|---|
-| Left click the chip | Open / close the panel |
+| Left click the chip | Open / close the panel — opening also retries a failed or stale fetch (a `live` state is left alone) |
 | Middle click the chip | Force a refresh |
 | Pencil icon (panel header) | Enter / leave edit mode |
 | `Escape` (panel focused) | Leave edit mode, or close the panel |
 | `e` (panel focused) | Enter / leave edit mode |
-| `r` (panel focused) | Refresh |
-| `c` (panel focused) | Copy the suggested command to the clipboard |
-| `qs ipc call garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
+| `r` (panel focused) | Refresh (ignored while in edit mode) |
+| `c` (panel focused) | Copy the suggested command to the clipboard (only when a guidance command is shown) |
+| `↑ ↓` / `j` `k` (edit mode) | Walk the rows — arrow keys and their `j`/`k` equivalents work interchangeably |
+| `← →` / `h` `l` (edit mode) | Reorder the current row (or pick the bar-chip metric on the top row) — arrow keys and their `h`/`l` equivalents work interchangeably |
+| `space` / `Enter` (edit mode) | Show or hide the row — the two keys are equivalent |
+| `Tab` / `Shift-Tab` (panel focused) | Switch to the next / previous bar-widget's panel (multi-monitor setups) |
+| `omarchy-shell garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
 
 ---
 
@@ -57,7 +69,7 @@ older one; the footer's `· stale` is what tells you so.
 ![Editing cards](docs/edit-mode.png)
 
 The pencil in the panel header opens **edit mode**, and everything about which
-cards you see lives there — no config file, no shell restart:
+cards you see lives there — you never edit `shell.json` by hand:
 
 - the **bar chip metric** as four chips at the top (Body Battery, Steps, Sleep,
   Readiness), the current one highlighted;
@@ -79,7 +91,9 @@ prefs.json  >  shell.json setting  >  built-in default
 ```
 
 So the settings below are the starting point, and edit mode is the last word.
-Delete `prefs.json` and the widget goes straight back to your `shell.json`.
+Delete `prefs.json` and the widget goes back to your `shell.json` settings —
+but only after a shell restart (`omarchy restart shell`); it is not picked up
+live.
 
 ---
 
@@ -137,6 +151,13 @@ than the poll interval.
 
 ---
 
+## What's new in 0.3.1
+
+Fixes: `customCommand` runs via argv rather than a shell string, the custom
+card's output is capped by content rather than by a fixed byte count, card
+rows are height-equalized, the week view no longer breaks on an empty
+morning, and screenshots/docs got a refresh.
+
 ## What's new in 0.3.0
 
 - **Edit mode.** The pencil in the panel header turns the card list into a
@@ -156,7 +177,8 @@ than the poll interval.
   training readiness in the bar instead of Body Battery, with its own glyph and
   its own sensible threshold colours.
 - **The panel is a deck of cards you order yourself.** `panelMetrics` picks from
-  eleven metrics — including a day-long Body Battery + stress curve, HRV status,
+  eleven metrics (twelve with `custom` since 0.3.0) — including a day-long Body
+  Battery + stress curve, HRV status,
   weekly intensity minutes, floors, calories and your last activity — and shows
   them in the order you list.
 - **Seven days of context.** Cards carry a seven-day strip and a `↗ ↘ →` delta
@@ -178,24 +200,28 @@ the tokens or the cache moved.
   it talks to requires **Python 3.12+**. Omarchy's system Python is newer than
   that, so this is normally already satisfied.
 - **A Garmin Connect account.** No Garmin developer key is needed.
+- **`wl-clipboard`** — for the panel's copy button. Usually already installed
+  on Omarchy.
 
 ### External dependency: `garminconnect`
 
 This plugin has one external dependency, and it is not installed for you.
 
 Arch (and every other PEP 668 distro) refuses `pip install` into the system
-Python, so the helper uses a **dedicated virtualenv** it knows how to find:
+Python, so the helper uses a **dedicated virtualenv** it knows how to find —
+this is the same one-liner the panel shows (and its copy button copies) when
+the dependency is missing:
 
 ```bash
-python3 -m venv ~/.local/share/garmin-widget/venv
-~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11
+python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11
 ```
 
 Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
 calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
 `get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
 `get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
-`get_last_activity()`) have been stable for a long time, and each one is asked
+`get_last_activity()`, `get_daily_steps()` — the ranged call the one-time
+history backfill uses) have been stable for a long time, and each one is asked
 for separately so a renamed endpoint costs you a card rather than the widget —
 but 0.3.11 is the version the widget was tested on.
 
@@ -204,8 +230,9 @@ touched. The helper re-execs itself into that venv automatically when
 `garminconnect` is not importable from the interpreter it started under — you
 never have to activate anything.
 
-Until the venv exists the bar chip shows `⚡—` dimmed and the panel says
-**HELPER DEPENDENCY MISSING**, with the two commands above in a copyable box.
+Until the venv exists the bar chip shows the bolt glyph and an em dash,
+dimmed, and the panel says
+**HELPER DEPENDENCY MISSING**, with the one-liner above in a copyable box.
 
 ---
 
@@ -257,11 +284,11 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 
 | Setting | Type | Default | What it does |
 |---|---|---|---|
-| `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes** — anything lower (including `0`, which a typo makes easy) is clamped, since Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
+| `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes**; `0` (or anything non-numeric) falls back to the 30-minute default instead of being floored — Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
 | `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
-| `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. `⚡61  8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
+| `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. the bolt glyph and `61` followed by `8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
-| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the seven-day strips are dropped to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
+| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `customCommand` | string | `""` (off) | A command line whose stdout is one JSON object `{title, value, caption, meter:{value,max}, tone}`, rendered as the `custom` card. Empty means the card does not exist and nothing is ever run. See [Your own card](#your-own-card) for the contract and the safety rails. |
 
 On a multi-monitor setup the widget appears on every bar, and it is designed so
@@ -274,8 +301,14 @@ single-monitor setup; multi-monitor reports welcome.)
 ## Privacy
 
 Your credentials go to Garmin only. Tokens are stored locally in
-`~/.config/garmin-widget/` with 0600 permissions. The widget connects to Garmin
+`~/.config/garmin-widget/` with 0600 permissions. The helper connects to Garmin
 Connect only — no telemetry, no other hosts.
+
+That Garmin-only claim is scoped to the **helper**. The plugin's QML runs
+unsandboxed inside the shell process, with whatever access that process has,
+and the helper — along with any `customCommand` you configure — runs as your
+own user: a `customCommand` can reach anything your own scripts can reach. See
+[Your own card](#your-own-card) for the safety rails around that.
 
 Everything this plugin writes lives under your home directory:
 
@@ -296,7 +329,7 @@ Open the panel to see which you are in.
 
 | Panel says | What happened | What to do |
 |---|---|---|
-| **HELPER DEPENDENCY MISSING** | `garminconnect` is not importable and no venv was found. | Run the two venv commands under [External dependency](#external-dependency-garminconnect). |
+| **HELPER DEPENDENCY MISSING** | `garminconnect` is not importable and no venv was found. | Run the one-liner under [External dependency](#external-dependency-garminconnect). |
 | **NOT SIGNED IN** | No `~/.config/garmin-widget/tokens.json` yet. | Run `garmin-widget login` (path in the panel, copyable). |
 | **SESSION EXPIRED** | Garmin rejected the stored tokens. | Run `garmin-widget login` again. Tokens do expire; this is normal every so often. |
 | **OFFLINE** / **GARMIN API ERROR** | The network or Garmin Connect is unavailable. The specific error is shown. | Wait and hit Refresh. If a cached reading exists, the panel keeps showing it and marks the footer `· stale`. |
@@ -305,7 +338,7 @@ Open the panel to see which you are in.
 **Nothing appears in the bar at all.** Check the widget is enabled and placed:
 `omarchy plugin list`. After enabling, `omarchy restart shell`.
 
-**The chip shows `⚡—` and never updates.** Run the helper by hand — it always
+**The chip shows the bolt glyph and an em dash, and never updates.** Run the helper by hand — it always
 prints one JSON object and always exits 0, so the error is in the output:
 
 ```bash
@@ -336,9 +369,10 @@ Your data is unaffected — nothing is lost but a few seconds of bar.
 omarchy plugin remove io.github.n1byn1kt.garmin
 ```
 
-That removes the plugin only. Your tokens, cache and venv are deliberately left
-behind, so removing and re-adding the plugin (or moving to a newer version) does
-not make you log in again. To clear them out as well:
+That removes the plugin only. Your tokens, prefs, cache and venv are
+deliberately left behind, so removing and re-adding the plugin (or moving to a
+newer version) does not make you log in again or lose your card layout. To
+clear them out as well:
 
 ```bash
 rm -rf ~/.config/garmin-widget ~/.cache/garmin-widget ~/.local/share/garmin-widget
@@ -361,7 +395,7 @@ subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.
 
 The Python side is covered by a pytest suite under `tests/`, run with
-`python -m pytest` from the repo root.
+`python3 -m pytest tests/ -v` from the repo root.
 
 ## License
 
