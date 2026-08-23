@@ -29,7 +29,10 @@ BarWidget {
     // One helper process per bar, not one per screen. Re-asked on every tick,
     // so losing a monitor promotes a surviving instance instead of stopping.
     canPoll: function () { return root.isPrimaryInstance() }
-    onRefreshed: root.publish()
+    onRefreshed: {
+      root.publish()
+      root.syncIpc()
+    }
   }
 
   // ---- On-demand refresh
@@ -84,8 +87,24 @@ BarWidget {
   }
 
   // ---- State → presentation
-  readonly property var bb: service.data && service.data.bodyBattery ? service.data.bodyBattery.current : null
-  readonly property bool hasBattery: bb !== null && bb !== undefined
+  // Coerced through Number() rather than displayed raw. The payload comes from
+  // Garmin via a JSON file on disk, and a string where a number belongs would
+  // be rendered verbatim — widening the chip and shoving every widget to its
+  // left along the bar. Anything that will not coerce reads as no data at all.
+  readonly property var bb: {
+    var raw = service.data && service.data.bodyBattery ? service.data.bodyBattery.current : null
+    if (raw === null || raw === undefined || raw === "") return null
+    var n = Number(raw)
+    return isFinite(n) ? Math.round(n) : null
+  }
+  readonly property bool hasBattery: bb !== null
+
+  readonly property var stepCount: {
+    var raw = service.data && service.data.steps ? service.data.steps.count : null
+    if (raw === null || raw === undefined || raw === "") return null
+    var n = Number(raw)
+    return isFinite(n) ? n : null
+  }
 
   // Two kinds of broken, and they must not look alike. A missing dependency or
   // a dead login means we have no route to today's number at all, so showing
@@ -106,9 +125,8 @@ BarWidget {
 
   readonly property string displayText: {
     var t = root.boltGlyph + (root.showNumbers ? root.bb : "—")
-    if (root.showNumbers && root.showSteps && service.data && service.data.steps
-        && service.data.steps.count !== null && service.data.steps.count !== undefined)
-      t += "  " + (service.data.steps.count / 1000).toFixed(1) + "k"
+    if (root.showNumbers && root.showSteps && root.stepCount !== null)
+      t += "  " + (root.stepCount / 1000).toFixed(1) + "k"
     if (root.showStaleMark) t += " ·"
     return t
   }
@@ -190,7 +208,10 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onBarChanged: injectPanel()
+  onBarChanged: {
+    injectPanel()
+    Qt.callLater(root.syncIpc)
+  }
   onSettingsChanged: injectPanel()
 
   Loader {
@@ -204,8 +225,36 @@ BarWidget {
     }
   }
 
+  // ---- IPC
+  //
+  // `qs ipc call garmin …` addresses one target name, but the bar builds one
+  // copy of this widget per monitor and each would try to claim it. Two
+  // handlers on one target is the same duplicate-registration shape that
+  // crashed the shell before, so only the primary instance registers; the
+  // handlers it exposes already fan out to the others through broadcast().
+  //
+  // Re-checked rather than bound: peers() is empty while the bar is still
+  // registering widgets, so an eager binding would have every instance decide
+  // it was primary. syncIpc() runs once the bar has settled and again on every
+  // poll, so unplugging the primary's screen promotes a survivor within a
+  // cycle instead of leaving `qs ipc call garmin` permanently dead.
+  property bool ipcEnabled: false
+
+  function syncIpc() {
+    root.ipcEnabled = root.isPrimaryInstance()
+  }
+
+  Timer {
+    id: ipcSettleTimer
+    interval: 1500
+    repeat: false
+    running: true
+    onTriggered: root.syncIpc()
+  }
+
   IpcHandler {
     target: "garmin"
+    enabled: root.ipcEnabled
 
     function refresh(): void { root.requestRefresh() }
     function open(): void { root.open() }

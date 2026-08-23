@@ -107,7 +107,17 @@ Panel {
     return at === -1 ? p : "~" + p.substring(at)
   }
   readonly property string loginCommand: root.helperDisplayPath + " login"
-  readonly property string depsCommand: "pip install garminconnect"
+  // Arch and every other PEP 668 distro refuse `pip install` into the system
+  // python, so the command has to build the dedicated venv the helper re-execs
+  // into. Prefer the helper's own `hint` — it is the one string guaranteed to
+  // match the interpreter that will actually run — and keep the literal below
+  // byte-identical to DEPS_HINT in bin/garmin-widget for the case where the
+  // hint never arrived (a secondary monitor's adopted payload, an older
+  // helper).
+  readonly property string depsCommand:
+    root.service && String(root.service.lastHint || "") !== ""
+      ? String(root.service.lastHint)
+      : "python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect"
 
   readonly property string guidanceTitle: {
     switch (root.svcState) {
@@ -173,6 +183,12 @@ Panel {
 
   property bool copied: false
 
+  // execDetached does take an argv, so `["wl-copy", value]` would avoid the
+  // shell entirely — but wl-copy detaches a clipboard-owning child, and going
+  // through `bash -c` is the idiom Omarchy's own tailscale and network panels
+  // use (shell/plugins/panels/{tailscale/Service,network/Panel}.qml). Matching
+  // the shipped pattern is worth more here than dropping one process; the
+  // value is shell-quoted, so it is not an injection surface either way.
   function copy(text) {
     var value = String(text || "")
     if (value === "") return

@@ -26,6 +26,12 @@ Item {
   property var data: null
 
   property string lastError: ""
+
+  // The helper's own remediation string, when it sends one — so the panel
+  // prints the command that actually fixes *this* install rather than a
+  // literal the helper has since moved on from.
+  property string lastHint: ""
+
   property int pollMinutes: 30
 
   // Gate the owner can use to decide, at each tick, whether this instance is
@@ -44,8 +50,20 @@ Item {
   // The helper ships inside the plugin directory, so it is located relative to
   // this file rather than through PATH — the plugin must work unpacked
   // anywhere under ~/.config/omarchy/plugins/.
-  readonly property string helperPath:
-    decodeURIComponent(String(Qt.resolvedUrl("bin/garmin-widget")).replace(/^file:\/\//, ""))
+  //
+  // decodeURIComponent throws URIError on a stray "%" in a path — a plugin
+  // unpacked under a directory with one in its name would take the whole
+  // widget down at construction. The percent-encoded path still runs fine as
+  // an argv[0] in the overwhelming majority of cases, so a failed decode falls
+  // back to it rather than leaving the Service with no helper at all.
+  readonly property string helperPath: {
+    var raw = String(Qt.resolvedUrl("bin/garmin-widget")).replace(/^file:\/\//, "")
+    try {
+      return decodeURIComponent(raw)
+    } catch (e) {
+      return raw
+    }
+  }
 
   signal refreshed()
 
@@ -62,6 +80,7 @@ Item {
   function refresh() {
     if (fetchProcess.running) return
     _stdout = ""
+    root.lastHint = ""
     fetchProcess.command = [root.helperPath, "fetch"]
     fetchProcess.running = true
     watchdog.restart()
@@ -84,11 +103,13 @@ Item {
     if (payload.ok === true) {
       root.data = payload
       root.lastError = ""
+      root.lastHint = ""
       root.state = payload.stale === true ? "stale" : "live"
       root.refreshed()
       return
     }
 
+    root.lastHint = String(payload.hint || "")
     var code = String(payload.error || "")
     if (root.knownErrors.indexOf(code) === -1) code = "api-error"
     root.fail(code, String(payload.detail || payload.hint || payload.error || ""))
