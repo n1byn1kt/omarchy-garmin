@@ -3,7 +3,7 @@
   "id": "io.github.n1byn1kt.garmin",
   "name": "Garmin",
   "version": "0.1.0",
-  "author": "jfk",
+  "author": "n1byn1kt",
   "description": "Today's Garmin health at a glance: Body Battery in the bar; sleep score, steps, and resting heart rate in a click panel.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },

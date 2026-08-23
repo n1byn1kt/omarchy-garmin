@@ -58,6 +58,11 @@ python3 -m venv ~/.local/share/garmin-widget/venv
 ~/.local/share/garmin-widget/venv/bin/pip install garminconnect
 ```
 
+Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
+four calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
+`get_sleep_data()`) have been stable for a long time — but 0.3.11 is the
+version the widget was tested on.
+
 Nothing is installed system-wide, and nothing outside your home directory is
 touched. The helper re-execs itself into that venv automatically when
 `garminconnect` is not importable from the interpreter it started under — you
@@ -116,7 +121,7 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 
 | Setting | Type | Default | What it does |
 |---|---|---|---|
-| `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. Garmin's numbers move slowly; polling harder mostly buys you rate limits. |
+| `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes** — anything lower (including `0`, which a typo makes easy) is clamped, since Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
 | `showSteps` | boolean | `false` | Also show today's steps next to Body Battery in the bar (e.g. `⚡61  8.0k`). |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
 
@@ -207,8 +212,8 @@ python3 -m pytest tests/ -v          # helper unit tests, no network
 omarchy plugin validate .            # manifest schema check
 ```
 
-The plugin is four files: `manifest.json`, `Service.qml` (poller and state
-machine), `BarWidget.qml` (the chip), `Panel.qml` (the detail panel), plus the
+The plugin is five files: `manifest.json`, `Service.qml` (poller and state
+machine), `BarWidget.qml` (the chip), `Panel.qml` (the detail panel), and the
 Python helper in `bin/garmin-widget`. The helper's contract is that every
 subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.
