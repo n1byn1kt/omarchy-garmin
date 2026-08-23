@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 docs/*.md
 grok-*.txt
+develop.html
+publish.html
+shell-readme.md
