@@ -111,14 +111,18 @@ printf '{"title":"Disk","value":"%s free","caption":"%s%% used","meter":{"value"
 ```
 
 Then set `customCommand` to `~/garmin-card-disk.sh` and turn the **Custom
-command** row on in edit mode (it only appears once a command is set).
+command** row on in edit mode (it only appears once a command is set). Turning
+that row off stops the command from running at all, not just from being drawn.
 
 The card is deliberately unable to hurt the rest of the widget. It runs in its
 own process with a **10-second timeout**, output over **8 KB** is ignored, and
 anything that is not a well-formed object with a title and a value — garbage, a
 non-zero exit, a hang, valid JSON of the wrong shape — simply **hides the card**
 and puts the reason in the chip's tooltip, prefixed `custom card:`. The Garmin
-fetch, the chip's number and every other card carry on untouched.
+fetch, the chip's number and every other card carry on untouched. One caveat on
+the timeout: it kills the `bash -c` your command line runs in, and — that being
+how `bash -c` works — anything your command backgrounded or spawned into another
+process group is left running, so write commands that finish on their own.
 
 Two things it is not: it is not a shell you should put secrets in (the command
 line sits in `shell.json` in plain text), and it is not a scheduler — a command

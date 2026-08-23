@@ -99,6 +99,29 @@ Item {
   property var customCard: null
   property string customError: ""
 
+  // The panel's card list as it comes from shell.json, injected by the owner
+  // the same way `pollMinutes` and `customCommand` are. The Service needs it
+  // for one reason only: a `custom` token the user has turned off in edit mode
+  // must stop the command from *running*, not merely stop its card from being
+  // drawn. Somebody's script is not a rendering detail.
+  //
+  // Precedence mirrors the panel's own: prefs.json > shell.json > the built-in
+  // default (which contains no `custom` token, so an unconfigured install never
+  // runs anything).
+  property string panelMetricsSetting: ""
+
+  readonly property string effectivePanelMetrics: {
+    var pref = String(root.prefPanelMetrics || "")
+    return pref !== "" ? pref : String(root.panelMetricsSetting || "")
+  }
+
+  readonly property bool customEnabled: {
+    var parts = String(root.effectivePanelMetrics || "").split(",")
+    for (var i = 0; i < parts.length; i++)
+      if (parts[i].replace(/^\s+|\s+$/g, "").toLowerCase() === "custom") return true
+    return false
+  }
+
   // 8 KB is already two orders of magnitude more than a card needs. Past it we
   // stop reading rather than truncate: half a JSON object parses as garbage,
   // and "your command printed too much" is the more useful thing to say.
@@ -196,6 +219,11 @@ Item {
   // would then trigger another read, which would change `prefs` again.
   signal prefsWritten()
 
+  // The mirror image: a `prefs set` that did not stick. The edit UI has already
+  // moved to the state the user asked for, and nothing on disk agrees with it —
+  // the owner uses this to put its toggles back where they were.
+  signal prefsRejected()
+
   property bool _prefsWasSet: false
 
   function applyPrefs(text) {
@@ -206,12 +234,14 @@ Item {
       obj = JSON.parse(String(text))
     } catch (e) {
       root.prefsError = "unreadable prefs output"
+      if (wasSet) root.prefsRejected()
       return
     }
     if (!obj || typeof obj !== "object" || obj.ok !== true
         || !obj.prefs || typeof obj.prefs !== "object") {
       // The helper's one rejection detail ("InvalidPref") or nothing at all.
       root.prefsError = String((obj && obj.detail) || "prefs rejected")
+      if (wasSet) root.prefsRejected()
       return
     }
     root.prefsError = ""
@@ -247,14 +277,18 @@ Item {
       if (!prefsProcess.running) return
       prefsWatchdog.tripped = true
       prefsProcess.running = false
+      var wasSet = root._prefsWasSet
       root._prefsWasSet = false
       root.prefsError = "prefs helper timed out"
+      if (wasSet) root.prefsRejected()
     }
   }
 
   // ---- custom card plumbing
   function runCustom() {
-    if (String(root.customCommand) === "") {
+    // No command, or the card switched off in edit mode: nothing runs and any
+    // card left over from the last configuration goes away with it.
+    if (String(root.customCommand) === "" || !root.customEnabled) {
       root.customCard = null
       root.customError = ""
       return
@@ -263,9 +297,39 @@ Item {
     _customOut = ""
     // The user's own command line, so it gets a shell — that is what a command
     // line is. Nothing here is interpolated into it.
-    customProcess.command = ["bash", "-c", String(root.customCommand)]
+    //
+    // `head -c 8193` is a hard bound on what a runaway command can push into
+    // this process: one byte past the cap is enough for applyCustom() to see it
+    // is over and reject the output, and nothing bigger is ever buffered. The
+    // QML-side check stays — it is what turns the excess into a message.
+    //
+    // `pipefail` is what keeps a failing command still reading as a failure:
+    // without it the pipeline's status is `head`'s, which is always 0, and an
+    // exit-3 script would be reported as "printed nothing". The cost is that a
+    // command killed by head's closed pipe surfaces as 141, which onExited
+    // translates back into the over-cap message.
+    customProcess.command = ["bash", "-c",
+      "set -o pipefail; { " + String(root.customCommand) + " ; } | head -c 8193"]
     customProcess.running = true
     customWatchdog.restart()
+  }
+
+  // Property changes must not make every screen run somebody's script. The poll
+  // path is gated by `canPoll()` (the owner's primary-instance test); the
+  // command/enabled triggers below go through the same gate. `_started` keeps
+  // them quiet until the bar has registered its widgets — before that every
+  // instance still looks primary, which is exactly the fan-out being avoided.
+  property bool _started: false
+
+  function runCustomIfPrimary() {
+    if (!root._started) return
+    var allowed = true
+    try {
+      allowed = root.canPoll()
+    } catch (e) {
+      allowed = true
+    }
+    if (allowed) root.runCustom()
   }
 
   function customFail(detail) {
@@ -350,7 +414,11 @@ Item {
       customWatchdog.tripped = false
       if (timedOut) return
       if (exitCode !== 0) {
-        root.customFail("command exited " + exitCode)
+        // 141 = SIGPIPE, which on this pipeline means `head` hit the cap and
+        // closed on the command rather than the command itself failing.
+        root.customFail(exitCode === 141
+          ? "command printed more than 8 KB"
+          : "command exited " + exitCode)
         return
       }
       root.applyCustom(String(customStdout.text || root._customOut || ""))
@@ -370,7 +438,8 @@ Item {
     }
   }
 
-  onCustomCommandChanged: root.runCustom()
+  onCustomCommandChanged: root.runCustomIfPrimary()
+  onCustomEnabledChanged: root.runCustomIfPrimary()
 
   // Take a result the primary instance already paid for. Deliberately silent —
   // emitting `refreshed()` here would bounce the payload straight back out
@@ -444,6 +513,11 @@ Item {
     interval: 1500
     repeat: false
     running: true
-    onTriggered: root.poll()
+    onTriggered: {
+      // From here on `canPoll()` can tell primary from secondary, so the
+      // custom-card property triggers are allowed to fire.
+      root._started = true
+      root.poll()
+    }
   }
 }

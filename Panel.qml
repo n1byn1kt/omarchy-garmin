@@ -607,6 +607,16 @@ Panel {
   // The body says so rather than leaving a hero floating above a separator.
   readonly property int visibleCardCount: root.visibleTokens.length
 
+  // The custom card is the one card in the list that does not come from Garmin,
+  // so it is the one card that still has something to say when the Garmin rows
+  // are gated off. `showRows` false plus a card that parsed cleanly is exactly
+  // that case; when the rows are on it renders in its normal place instead.
+  readonly property bool showCustomAlone:
+    !root.showRows && root.customCard !== null
+    && root.metricTokens.indexOf("custom") !== -1
+
+  readonly property var customAloneCard: root.cardFor("custom", true)
+
   // ---- Card descriptors
   //
   // One function, one card, every string already formatted: the delegate below
@@ -865,7 +875,32 @@ Panel {
     root.editOrder = order
     root.editEnabled = enabled
     root.editCursor = 0
+    root.savedOrder = order.slice()
+    root.savedEnabled = enabled.slice()
     root.editMode = true
+  }
+
+  // The last edit state the helper actually accepted. Every toggle and move
+  // changes the UI first and asks the helper second, so a rejected `prefs set`
+  // would otherwise leave the panel showing a configuration that exists nowhere
+  // but on screen — and survives until the panel is reopened. On a rejection
+  // the rows go back to these, and the "Couldn't save:" line says why.
+  property var savedOrder: []
+  property var savedEnabled: []
+
+  function revertEdit() {
+    root.editOrder = root.savedOrder.slice()
+    root.editEnabled = root.savedEnabled.slice()
+    if (root.editCursor > root.editOrder.length) root.editCursor = root.editOrder.length
+  }
+
+  Connections {
+    target: root.service
+    function onPrefsWritten() {
+      root.savedOrder = root.editOrder.slice()
+      root.savedEnabled = root.editEnabled.slice()
+    }
+    function onPrefsRejected() { root.revertEdit() }
   }
 
   function endEdit() { root.editMode = false }
@@ -1274,11 +1309,47 @@ Panel {
                     urgentColor: root.urgentColor
                     dim: root.dim
                     fontFamily: root.fontFamily
-                    muted: root.showStale
+                    // Garmin staleness says nothing about somebody's own
+                    // command, which was re-run on this very tick. Dimming it
+                    // alongside the Garmin cards claims its number is old too.
+                    muted: root.showStale && cardSlot.modelData !== "custom"
                   }
                 }
               }
             }
+          }
+        }
+
+        // ---- Custom card on its own, when the Garmin cards cannot render
+        //
+        // The card list above is gated on having a Garmin payload, which the
+        // custom card has nothing to do with: it is the user's own command,
+        // and a dead login or an unreachable API is no reason to hide it. In
+        // every degraded state it comes back here as a single full-width row
+        // under the guidance block, so "not signed in" costs you the Garmin
+        // cards and only those.
+        Column {
+          visible: root.showCustomAlone && !root.editMode
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSeparator { foreground: root.foreground }
+
+          MetricCard {
+            width: parent.width
+            height: implicitHeight
+            icon: root.customAloneCard.icon || ""
+            title: root.customAloneCard.title || ""
+            value: root.customAloneCard.value || "—"
+            caption: root.customAloneCard.caption || ""
+            tone: root.customAloneCard.tone || ""
+            meterPercent: root.customAloneCard.meterPercent === undefined
+              ? -1 : root.customAloneCard.meterPercent
+            foreground: root.foreground
+            accentColor: root.accentColor
+            urgentColor: root.urgentColor
+            dim: root.dim
+            fontFamily: root.fontFamily
           }
         }
 

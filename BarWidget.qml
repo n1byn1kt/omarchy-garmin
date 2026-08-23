@@ -79,6 +79,10 @@ BarWidget {
     // The user's own command line for the optional `custom` panel card. Empty
     // (the default) means the card does not exist and nothing is ever run.
     customCommand: String(root.setting("customCommand", ""))
+    // The panel's card list, so the Service can tell whether the `custom` card
+    // is switched on at all. Hiding the card must also stop the command — the
+    // panel is not always open, so this cannot live there.
+    panelMetricsSetting: String(root.setting("panelMetrics", ""))
     // One helper process per bar, not one per screen. Re-asked on every tick,
     // so losing a monitor promotes a surviving instance instead of stopping.
     canPoll: function () { return root.isPrimaryInstance() }
