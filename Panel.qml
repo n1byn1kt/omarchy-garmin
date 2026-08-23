@@ -117,7 +117,7 @@ Panel {
   readonly property string depsCommand:
     root.service && String(root.service.lastHint || "") !== ""
       ? String(root.service.lastHint)
-      : "python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect"
+      : "python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11"
 
   readonly property string guidanceTitle: {
     switch (root.svcState) {
@@ -259,6 +259,13 @@ Panel {
   readonly property var floorsInfo: root.payload && root.payload.floors ? root.payload.floors : null
   readonly property var caloriesInfo: root.payload && root.payload.calories ? root.payload.calories : null
   readonly property var activityInfo: root.payload && root.payload.lastActivity ? root.payload.lastActivity : null
+
+  // The custom card is not part of the Garmin payload at all — the Service
+  // runs the user's command beside the fetch and hands over an already
+  // sanitised {title, value, caption, tone, meterPercent}, or null.
+  readonly property var customCard: root.service && root.service.customCard ? root.service.customCard : null
+  readonly property string customCommand: root.service ? String(root.service.customCommand || "") : ""
+  readonly property string customError: root.service ? String(root.service.customError || "") : ""
 
   // History is a list of daily snapshots the helper keeps in its cache. It can
   // be missing entirely (an older helper), empty (first run), or one entry
@@ -503,13 +510,32 @@ Panel {
   // default set rather than leaving the body empty.
   readonly property var knownMetrics: [
     "curve", "battery", "sleep", "steps", "readiness",
-    "rhr", "hrv", "intensity", "floors", "calories", "activity"
+    "rhr", "hrv", "intensity", "floors", "calories", "activity", "custom"
   ]
   readonly property string defaultMetrics: "curve,sleep,steps,readiness,rhr"
 
+  // Names for the edit list. The cards themselves title from `cardFor`, which
+  // has nothing to say about a metric this account has no data for — the edit
+  // list has to name every token whether or not it can render today.
+  readonly property var metricLabels: ({
+    "curve": "Day curve", "battery": "Body Battery", "sleep": "Sleep",
+    "steps": "Steps", "readiness": "Training readiness", "rhr": "Resting HR",
+    "hrv": "HRV", "intensity": "Intensity minutes", "floors": "Floors",
+    "calories": "Calories", "activity": "Last activity",
+    "custom": "Custom command"
+  })
+
+  // Precedence: prefs.json (the panel's own edit mode) > the shell.json
+  // setting > the built-in default. The pref is the most recent thing the user
+  // chose by hand, so it wins; deleting prefs.json hands control straight back
+  // to shell.json.
+  readonly property string effectivePanelMetrics: {
+    var pref = root.service ? String(root.service.prefPanelMetrics || "") : ""
+    return pref !== "" ? pref : String(root.setting("panelMetrics", root.defaultMetrics))
+  }
+
   readonly property var metricTokens: {
-    var raw = String(root.setting("panelMetrics", root.defaultMetrics))
-    var parsed = root.parseMetrics(raw)
+    var parsed = root.parseMetrics(root.effectivePanelMetrics)
     return parsed.length > 0 ? parsed : root.parseMetrics(root.defaultMetrics)
   }
 
@@ -773,6 +799,171 @@ Panel {
     return { "kind": "metric", "show": false }
   }
 
+  // ---- Edit mode
+  //
+  // The panel is where people look at these cards, so it is also where they
+  // should be able to rearrange them — settings for a widget you are staring
+  // at should not live in a JSON file in another window. The edit view replaces
+  // the card list rather than sitting beside it: the panel has no scrolling by
+  // design, and twelve rows plus twelve cards would not fit on a 1080p screen.
+  //
+  // Everything written here goes through the helper's `prefs set`, which
+  // validates and owns the file. QML never touches disk.
+  property bool editMode: false
+
+  // Every token in display order — chosen ones first, then the rest — plus the
+  // subset that is actually on. Only the enabled part is persisted, so the
+  // parked position of a hidden card lasts as long as the panel is open and
+  // then goes back to the tail of the list. That is deliberate: a persisted
+  // order for cards nobody can see is state the user cannot inspect.
+  property var editOrder: []
+  property var editEnabled: []
+
+  // 0 is the chip-metric row; 1..n are the card rows. One integer is the whole
+  // keyboard model — PanelKeyCatcher takes arrows before any child sees them,
+  // so Tab-focus on the buttons would never receive Space or Return anyway.
+  property int editCursor: 0
+
+  // `custom` only exists when there is a command to run.
+  readonly property var editableTokens: {
+    var out = []
+    for (var i = 0; i < root.knownMetrics.length; i++) {
+      var t = root.knownMetrics[i]
+      if (t === "custom" && root.customCommand === "") continue
+      out.push(t)
+    }
+    return out
+  }
+
+  readonly property int editRowCount: 1 + root.editOrder.length
+
+  function beginEdit() {
+    var order = []
+    for (var i = 0; i < root.metricTokens.length; i++)
+      if (root.editableTokens.indexOf(root.metricTokens[i]) !== -1)
+        order.push(root.metricTokens[i])
+    var enabled = order.slice()
+    for (var j = 0; j < root.editableTokens.length; j++)
+      if (order.indexOf(root.editableTokens[j]) === -1) order.push(root.editableTokens[j])
+    root.editOrder = order
+    root.editEnabled = enabled
+    root.editCursor = 0
+    root.editMode = true
+  }
+
+  function endEdit() { root.editMode = false }
+  function toggleEdit() { root.editMode ? root.endEdit() : root.beginEdit() }
+
+  function isEnabled(token) { return root.editEnabled.indexOf(token) !== -1 }
+
+  function toggleToken(token) {
+    var list = root.editEnabled.slice()
+    var at = list.indexOf(token)
+    if (at === -1) list.push(token)
+    // The last visible card cannot be turned off: an empty list is rejected by
+    // the helper (it would read back as "no pref" and fall through to
+    // shell.json), so allowing it here would just produce a silent no-op.
+    else if (list.length > 1) list.splice(at, 1)
+    else return
+    root.editEnabled = list
+    root.commitEdit()
+  }
+
+  function moveToken(token, delta) {
+    var order = root.editOrder.slice()
+    var at = order.indexOf(token)
+    var to = at + delta
+    if (at === -1 || to < 0 || to >= order.length) return
+    order[at] = order[to]
+    order[to] = token
+    root.editOrder = order
+    if (root.editCursor === at + 1) root.editCursor = to + 1
+    root.commitEdit()
+  }
+
+  function commitEdit() {
+    var list = []
+    for (var i = 0; i < root.editOrder.length; i++)
+      if (root.isEnabled(root.editOrder[i])) list.push(root.editOrder[i])
+    if (list.length === 0) return
+    if (!root.applyPref("panelMetrics", list.join(","))) commitRetry.restart()
+  }
+
+  // A `prefs set` already in flight makes the next one a no-op — clicking two
+  // toggles quickly would otherwise lose the second. The retry re-derives the
+  // whole list from the current edit state, so it always writes the latest
+  // intent rather than replaying a stale one.
+  Timer {
+    id: commitRetry
+    interval: 200
+    repeat: false
+    onTriggered: root.commitEdit()
+  }
+
+  function applyPref(key, value) {
+    // Through the host widget, so the write fans out to every screen's copy of
+    // the widget rather than only the one whose panel is open.
+    if (root.hostWidget && typeof root.hostWidget.setPref === "function")
+      return root.hostWidget.setPref(key, value) !== false
+    if (root.service && typeof root.service.setPref === "function")
+      return root.service.setPref(key, value) !== false
+    return false
+  }
+
+  readonly property var barMetricOptions: [
+    { "token": "bodyBattery", "label": "Body Battery" },
+    { "token": "steps", "label": "Steps" },
+    { "token": "sleep", "label": "Sleep" },
+    { "token": "readiness", "label": "Readiness" }
+  ]
+
+  // Asked of the bar widget rather than re-derived here, so the highlighted
+  // chip is by definition the one the bar is actually showing.
+  readonly property string currentBarMetric:
+    root.hostWidget && root.hostWidget.barMetric ? String(root.hostWidget.barMetric) : "bodyBattery"
+
+  function pickBarMetric(token) {
+    barMetricRetry.pending = ""
+    if (root.applyPref("barMetric", token)) return
+    // Same one-in-flight problem the card list has: park the intent and try
+    // again in a moment rather than dropping the click.
+    barMetricRetry.pending = token
+    barMetricRetry.restart()
+  }
+
+  Timer {
+    id: barMetricRetry
+    property string pending: ""
+    interval: 200
+    repeat: false
+    onTriggered: if (barMetricRetry.pending !== "") root.pickBarMetric(barMetricRetry.pending)
+  }
+
+  // Arrow keys: up/down walk the rows, left/right act on the row under the
+  // cursor — reorder on a card row, pick on the chip row.
+  function editMove(dx, dy) {
+    if (dy !== 0) {
+      var next = root.editCursor + (dy > 0 ? 1 : -1)
+      root.editCursor = Math.max(0, Math.min(root.editRowCount - 1, next))
+      return
+    }
+    if (dx === 0) return
+    if (root.editCursor === 0) {
+      var at = -1
+      for (var i = 0; i < root.barMetricOptions.length; i++)
+        if (root.barMetricOptions[i].token === root.currentBarMetric) at = i
+      var to = Math.max(0, Math.min(root.barMetricOptions.length - 1, at + (dx > 0 ? 1 : -1)))
+      if (to !== at) root.pickBarMetric(root.barMetricOptions[to].token)
+      return
+    }
+    root.moveToken(root.editOrder[root.editCursor - 1], dx > 0 ? 1 : -1)
+  }
+
+  function editActivate() {
+    if (root.editCursor === 0) return
+    root.toggleToken(root.editOrder[root.editCursor - 1])
+  }
+
   // ---- Palette (taken off the bar so a recoloured bar carries through)
   readonly property color foreground: root.bar ? root.bar.foreground : Color.foreground
   readonly property color urgentColor: root.bar ? root.bar.urgent : Color.urgent
@@ -797,10 +988,21 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      // Escape leaves edit mode first and only closes the panel on a second
+      // press — the same shape every modal editor has, and the alternative
+      // (panel vanishes mid-rearrange) loses the user their place.
+      onCloseRequested: root.editMode ? root.endEdit() : root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) { if (root.editMode) root.editMove(dx, dy) }
+      onActivateRequested: if (root.editMode) root.editActivate()
       onTextKey: function(t) {
+        if (root.editMode) {
+          // j/k/h/l already arrive as moveRequested; only the exits matter here.
+          if (t === "e" || t === "E") root.endEdit()
+          return
+        }
         if (t === "r" || t === "R") root.refresh()
+        else if (t === "e" || t === "E") root.beginEdit()
         else if ((t === "c" || t === "C") && root.showGuidance) root.copy(root.guidanceCommand)
       }
 
@@ -812,9 +1014,23 @@ Panel {
         PanelHero {
           width: parent.width
           title: "Garmin"
-          meta: root.heroMeta
+          meta: root.editMode ? "Editing cards" : root.heroMeta
           foreground: root.foreground
           fontFamily: root.fontFamily
+          // The pencil sits in the hero's own trailing slot, which reserves
+          // the space and centres the control against the labels.
+          trailingControl: Component {
+            PanelActionButton {
+              // nf-md-pencil while looking, nf-md-check while editing.
+              iconText: root.editMode ? "󰄬" : "󰏫"
+              tooltipText: root.editMode ? "Done" : "Edit cards"
+              foreground: root.editMode ? root.accentColor : root.foreground
+              hoverColor: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.toggleEdit()
+            }
+          }
           iconComponent: Component {
             Text {
               // nf-md-lightning-bolt, the same glyph the bar chip uses.
@@ -828,7 +1044,7 @@ Panel {
 
         // ---- Guidance: deps / no-tokens / auth-expired
         Column {
-          visible: root.showGuidance
+          visible: root.showGuidance && !root.editMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -913,7 +1129,7 @@ Panel {
 
         // ---- Unreachable with nothing cached
         Column {
-          visible: root.showUnreachable
+          visible: root.showUnreachable && !root.editMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -940,7 +1156,7 @@ Panel {
         }
 
         Text {
-          visible: root.showLoading
+          visible: root.showLoading && !root.editMode
           width: parent.width
           text: "Checking…"
           color: root.dim
@@ -956,7 +1172,7 @@ Panel {
         // gets here — the delegates only place things.
         Column {
           id: cardsColumn
-          visible: root.showRows
+          visible: root.showRows && !root.editMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -1049,6 +1265,156 @@ Panel {
           }
         }
 
+        // ---- Edit mode: chip metric, then every card with a toggle and arrows
+        Column {
+          id: editColumn
+          visible: root.editMode
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSeparator { foreground: root.foreground }
+
+          Text {
+            width: parent.width
+            text: "BAR CHIP"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.barMetricOptions
+
+              Button {
+                required property var modelData
+                text: modelData.label
+                selected: root.currentBarMetric === modelData.token
+                // The keyboard cursor sits on the row, not on one option, so
+                // it shows on whichever chip is currently chosen.
+                hasCursor: root.editCursor === 0 && root.currentBarMetric === modelData.token
+                foreground: root.foreground
+                accent: root.accentColor
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                bordered: true
+                onClicked: root.pickBarMetric(modelData.token)
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: "PANEL CARDS"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Repeater {
+            model: root.editOrder
+
+            Item {
+              id: editRow
+              required property string modelData
+              required property int index
+
+              readonly property bool on: root.isEnabled(editRow.modelData)
+              readonly property bool cursored: root.editCursor === editRow.index + 1
+
+              width: editColumn.width
+              implicitHeight: Math.max(nameButton.implicitHeight, upButton.implicitHeight)
+
+              Button {
+                id: nameButton
+                anchors.left: parent.left
+                anchors.right: upButton.left
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                // The eye glyph carries the state, so the row reads the same
+                // whether the theme paints `selected` strongly or subtly.
+                text: (editRow.on ? "󰛐  " : "󰛑  ") + (root.metricLabels[editRow.modelData] || editRow.modelData)
+                leftAlign: true
+                selected: editRow.on
+                hasCursor: editRow.cursored
+                opacity: editRow.on ? 1.0 : 0.55
+                foreground: root.foreground
+                accent: root.accentColor
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                bordered: true
+                onClicked: root.toggleToken(editRow.modelData)
+              }
+
+              PanelActionButton {
+                id: upButton
+                anchors.right: downButton.left
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰁝"  // nf-md-arrow-up-thin
+                tooltipText: "Move up"
+                enabled: editRow.index > 0
+                opacity: enabled ? 1.0 : 0.35
+                foreground: root.foreground
+                hoverColor: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.moveToken(editRow.modelData, -1)
+              }
+
+              PanelActionButton {
+                id: downButton
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰁅"  // nf-md-arrow-down-thin
+                tooltipText: "Move down"
+                enabled: editRow.index < root.editOrder.length - 1
+                opacity: enabled ? 1.0 : 0.35
+                foreground: root.foreground
+                hoverColor: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.moveToken(editRow.modelData, 1)
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.customCommand === ""
+            text: "Set customCommand in the widget's settings to add your own card."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            width: parent.width
+            text: "↑↓ row · ←→ reorder · space show/hide · Esc done"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: root.service && String(root.service.prefsError || "") !== ""
+            text: "Couldn't save: " + (root.service ? String(root.service.prefsError || "") : "")
+            color: root.urgentColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
+
         // ---- Footer: freshness on the left, refresh on the right
         PanelSeparator { foreground: root.foreground }
 
@@ -1060,16 +1426,36 @@ Panel {
             id: footerText
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            text: root.busy ? "Refreshing…" : root.asOfText
-            color: root.showStale ? root.urgentColor : root.dim
+            text: root.editMode ? "Changes save as you make them"
+                                : (root.busy ? "Refreshing…" : root.asOfText)
+            color: root.showStale && !root.editMode ? root.urgentColor : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+          }
+
+          // Edit mode has its own exit here as well as the hero's check and
+          // Escape: a button labelled Done is the one affordance nobody has to
+          // discover.
+          Button {
+            id: doneButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.editMode
+            text: "Done"
+            foreground: root.foreground
+            accent: root.accentColor
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            bordered: true
+            focusable: true
+            onClicked: root.endEdit()
           }
 
           Button {
             id: refreshButton
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
+            visible: !root.editMode
             text: "Refresh"
             // Ui/Button paints `enabled` nowhere, so dim it by hand — otherwise
             // a fetch already in flight looks like a button that ignored you.

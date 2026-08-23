@@ -17,6 +17,7 @@ def _home() -> Path:
 
 # Recomputed at import so tests can swap $HOME per-test via load_helper().
 TOKENS_PATH = _home() / ".config" / "garmin-widget" / "tokens.json"
+PREFS_PATH = _home() / ".config" / "garmin-widget" / "prefs.json"
 CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
 HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
 
@@ -37,7 +38,7 @@ def cmd_status() -> int:
     return emit({"ok": True, "deps": HAS_GARMINCONNECT, "tokens": TOKENS_PATH.exists()})
 
 DEPS_HINT = ("python3 -m venv ~/.local/share/garmin-widget/venv && "
-             "~/.local/share/garmin-widget/venv/bin/pip install garminconnect")
+             "~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11")
 
 def _venv_python() -> Path:
     return _home() / ".local" / "share" / "garmin-widget" / "venv" / "bin" / "python"
@@ -97,6 +98,8 @@ def _dispatch(argv) -> int:
         return cmd_fetch()
     if cmd == "login":
         return cmd_login()
+    if cmd == "prefs":
+        return cmd_prefs(argv[1:])
     return emit({"ok": False, "error": "api-error", "detail": "unknown-command"})
 
 def main(argv) -> int:
@@ -602,6 +605,123 @@ def _update_history(payload, today, g=None):
         return history
     except Exception:
         return []
+
+# ---- prefs -----------------------------------------------------------------
+#
+# The panel's edit mode is the only thing that writes these, and it does it
+# through here rather than from QML: every file this plugin owns is created by
+# this helper, atomically and at 0600, and a second writer with its own idea of
+# permissions is exactly how a 0644 file appears six months later.
+
+# Panel card tokens, in the order the panel's own list uses them. Kept in step
+# with knownMetrics in Panel.qml — a token this helper drops is a card the
+# panel can never be asked for again.
+PANEL_METRICS = ("curve", "battery", "sleep", "steps", "readiness", "rhr",
+                 "hrv", "intensity", "floors", "calories", "activity", "custom")
+BAR_METRICS = ("bodyBattery", "steps", "sleep", "readiness")
+
+# A pref value is a short token list typed by a person, not a document. The cap
+# is here so a runaway caller cannot turn prefs.json into a megabyte the panel
+# re-parses on every startup.
+MAX_PREF_VALUE = 512
+
+
+def _invalid_pref() -> int:
+    """One error for every bad pref — a wrong key, a wrong value, a missing
+    argument. The panel does not act differently on any of them."""
+    return emit({"ok": False, "error": "api-error", "detail": "InvalidPref"})
+
+
+def _clean_panel_metrics(value):
+    """Known tokens only, de-duplicated, order preserved. Never raises.
+
+    Unknown tokens are dropped rather than rejected — the same rule the panel
+    applies to the shell.json setting, so a stale token from a future version
+    costs one card instead of the whole list.
+    """
+    out = []
+    for part in str(value).split(","):
+        token = part.strip().lower()
+        if token in PANEL_METRICS and token not in out:
+            out.append(token)
+    return out
+
+
+def _clean_bar_metric(value):
+    """The canonical spelling of a known bar metric, or None."""
+    token = str(value).strip().lower()
+    for known in BAR_METRICS:
+        if known.lower() == token:
+            return known
+    return None
+
+
+def _read_prefs():
+    """prefs.json, validated key by key. Anything else is not a pref.
+
+    prefs.json is a file on disk like any other, so it is read as untrusted
+    input: unknown keys are dropped (nothing else may ride into the panel this
+    way), and a value that no longer validates is treated as absent, which
+    falls the panel back to the shell.json setting rather than to nothing.
+    """
+    try:
+        data = json.loads(PREFS_PATH.read_text())
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    metrics = data.get("panelMetrics")
+    if isinstance(metrics, list):
+        cleaned = _clean_panel_metrics(
+            ",".join(str(m) for m in metrics[:len(PANEL_METRICS)]))
+        if cleaned:
+            out["panelMetrics"] = cleaned
+    bar = data.get("barMetric")
+    if isinstance(bar, str):
+        cleaned_bar = _clean_bar_metric(bar)
+        if cleaned_bar:
+            out["barMetric"] = cleaned_bar
+    return out
+
+
+def cmd_prefs(argv) -> int:
+    action = argv[0] if argv else ""
+    if action == "get":
+        return emit({"ok": True, "prefs": _read_prefs()})
+    if action != "set" or len(argv) < 3:
+        return _invalid_pref()
+
+    key, value = argv[1], argv[2]
+    if len(str(value)) > MAX_PREF_VALUE:
+        return _invalid_pref()
+
+    prefs = _read_prefs()
+    if key == "panelMetrics":
+        cleaned = _clean_panel_metrics(value)
+        # An empty list would read back as "no pref" and hand the panel back to
+        # the shell.json setting — the opposite of what the user just asked for.
+        if not cleaned:
+            return _invalid_pref()
+        prefs["panelMetrics"] = cleaned
+    elif key == "barMetric":
+        cleaned_bar = _clean_bar_metric(value)
+        if cleaned_bar is None:
+            return _invalid_pref()
+        prefs["barMetric"] = cleaned_bar
+    else:
+        return _invalid_pref()
+
+    _secure_config_dir()
+    _atomic_write(PREFS_PATH, prefs, ".prefs-")
+    # _atomic_write is deliberately best-effort — it must never break a fetch —
+    # so the write is verified here instead. A pref that did not land must not
+    # answer ok, or the panel shows a choice the next restart has forgotten.
+    if _read_prefs() != prefs:
+        return emit({"ok": False, "error": "api-error",
+                     "detail": "PrefsWriteFailed"})
+    return emit({"ok": True, "prefs": prefs})
+
 
 def cmd_login() -> int:
     if not HAS_GARMINCONNECT:

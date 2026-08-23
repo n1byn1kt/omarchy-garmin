@@ -120,8 +120,14 @@ def test_deps_hint_is_venv_install_for_fetch_and_login(home, monkeypatch, capsys
     assert out["hint"] == mod.DEPS_HINT
     assert out["hint"] == (
         "python3 -m venv ~/.local/share/garmin-widget/venv && "
-        "~/.local/share/garmin-widget/venv/bin/pip install garminconnect"
+        "~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11"
     )
+    # Panel.qml carries the same string as its fallback for payloads that
+    # arrive without a hint. The two must stay byte-identical or the panel
+    # prints an install command the helper has moved on from.
+    from conftest import HELPER
+    panel = (HELPER.parent.parent / "Panel.qml").read_text()
+    assert '"' + mod.DEPS_HINT + '"' in panel
     rc, out = run(mod, ["login"], capsys)
     assert out["error"] == "deps"
     assert out["hint"] == mod.DEPS_HINT

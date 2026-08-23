@@ -23,9 +23,15 @@ BarWidget {
   // known metrics falls back to Body Battery rather than blanking the chip,
   // for the same reason an unknown panel token drops a card instead of the
   // panel.
+  // Precedence: the panel's edit mode (prefs.json) beats the shell.json
+  // setting, which beats the default. The pref is what the user picked most
+  // recently and by hand, so it wins; deleting prefs.json hands control back to
+  // shell.json with nothing else to undo.
   readonly property var knownBarMetrics: ["bodyBattery", "steps", "sleep", "readiness"]
   readonly property string barMetric: {
-    var raw = String(root.setting("barMetric", "bodyBattery")).replace(/^\s+|\s+$/g, "").toLowerCase()
+    var pref = String(service.prefBarMetric || "")
+    var raw = (pref !== "" ? pref : String(root.setting("barMetric", "bodyBattery")))
+      .replace(/^\s+|\s+$/g, "").toLowerCase()
     for (var i = 0; i < root.knownBarMetrics.length; i++)
       if (root.knownBarMetrics[i].toLowerCase() === raw) return root.knownBarMetrics[i]
     return "bodyBattery"
@@ -77,7 +83,14 @@ BarWidget {
       root.publish()
       root.syncIpc()
     }
+    // A pref written on this screen is a pref every screen's chip and panel
+    // must honour, so the write fans out as a re-read rather than a copy.
+    onPrefsWritten: root.broadcast("reloadPrefs")
   }
+
+  // ---- prefs (panel edit mode)
+  function setPref(key, value) { return service.setPref(key, value) }
+  function reloadPrefs() { service.loadPrefs() }
 
   // ---- On-demand refresh
   //

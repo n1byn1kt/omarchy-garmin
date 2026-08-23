@@ -72,6 +72,38 @@ Item {
     }
   }
 
+  // ---- Preferences (written by the panel's edit mode, owned by the helper)
+  //
+  // QML never writes prefs.json itself: `garmin-widget prefs set` does, so the
+  // atomic-replace/0600 discipline every other file in this plugin gets applies
+  // here too. What comes back is already validated — unknown keys and unknown
+  // tokens are dropped helper-side — so the panel can bind it directly.
+  property var prefs: ({})
+  property string prefsError: ""
+
+  readonly property string prefPanelMetrics: {
+    var m = root.prefs ? root.prefs.panelMetrics : null
+    return (m && m.length !== undefined && m.length > 0) ? m.join(",") : ""
+  }
+  readonly property string prefBarMetric:
+    root.prefs && typeof root.prefs.barMetric === "string" ? root.prefs.barMetric : ""
+
+  // ---- Custom card
+  //
+  // The user's own command line, run on the poll cadence. Everything about it
+  // is deliberately walled off from the Garmin state machine above: its own
+  // Process, its own watchdog, its own error string. A command that hangs,
+  // exits 3, or prints a megabyte of noise costs its card and nothing else —
+  // `state` and `payload` never hear about it.
+  property string customCommand: ""
+  property var customCard: null
+  property string customError: ""
+
+  // 8 KB is already two orders of magnitude more than a card needs. Past it we
+  // stop reading rather than truncate: half a JSON object parses as garbage,
+  // and "your command printed too much" is the more useful thing to say.
+  readonly property int customOutputCap: 8192
+
   signal refreshed()
 
   function poll() {
@@ -128,6 +160,92 @@ Item {
     root.lastError = detail
     root.state = (code === "offline" && root.payload !== null) ? "stale" : code
     root.refreshed()
+  }
+
+  // ---- prefs plumbing
+  //
+  // One Process for both get and set: they are the same short-lived helper call
+  // and a set answers with the full prefs object, so the reply handling is
+  // identical. Both are fire-and-forget from the caller's point of view; the
+  // panel re-renders when `prefs` changes.
+  function loadPrefs() {
+    if (prefsProcess.running) return false
+    _prefsOut = ""
+    prefsProcess.command = [root.helperPath, "prefs", "get"]
+    prefsProcess.running = true
+    prefsWatchdog.restart()
+    return true
+  }
+
+  function setPref(key, value) {
+    if (prefsProcess.running) return false
+    _prefsOut = ""
+    root._prefsWasSet = true
+    prefsProcess.command = [root.helperPath, "prefs", "set", String(key), String(value)]
+    prefsProcess.running = true
+    prefsWatchdog.restart()
+    return true
+  }
+
+  // Emitted only after a successful `prefs set`, so the owner can tell its
+  // peers to re-read. A plain prefs *read* must not emit it: `prefs` changing
+  // would then trigger another read, which would change `prefs` again.
+  signal prefsWritten()
+
+  property bool _prefsWasSet: false
+
+  function applyPrefs(text) {
+    var wasSet = root._prefsWasSet
+    root._prefsWasSet = false
+    var obj
+    try {
+      obj = JSON.parse(String(text))
+    } catch (e) {
+      root.prefsError = "unreadable prefs output"
+      return
+    }
+    if (!obj || typeof obj !== "object" || obj.ok !== true
+        || !obj.prefs || typeof obj.prefs !== "object") {
+      // The helper's one rejection detail ("InvalidPref") or nothing at all.
+      root.prefsError = String((obj && obj.detail) || "prefs rejected")
+      return
+    }
+    root.prefsError = ""
+    root.prefs = obj.prefs
+    if (wasSet) root.prefsWritten()
+  }
+
+  property string _prefsOut: ""
+
+  Process {
+    id: prefsProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: prefsStdout; waitForEnd: true; onStreamFinished: root._prefsOut = text }
+    onExited: {
+      var timedOut = prefsWatchdog.tripped
+      prefsWatchdog.stop()
+      prefsWatchdog.tripped = false
+      if (timedOut) return
+      root.applyPrefs(String(prefsStdout.text || root._prefsOut || ""))
+    }
+  }
+
+  // prefs get/set is a local file read — if it has not answered in ten seconds
+  // something is very wrong, and leaving `running` latched would make every
+  // later edit silently do nothing.
+  Timer {
+    id: prefsWatchdog
+    property bool tripped: false
+    interval: 10000
+    repeat: false
+    onTriggered: {
+      if (!prefsProcess.running) return
+      prefsWatchdog.tripped = true
+      prefsProcess.running = false
+      root._prefsWasSet = false
+      root.prefsError = "prefs helper timed out"
+    }
   }
 
   // Take a result the primary instance already paid for. Deliberately silent —
@@ -187,6 +305,11 @@ Item {
   // an immediate first poll would run before `canPoll()` can tell primary from
   // secondary — and every screen would fetch once. A short delay costs nothing
   // on a 30-minute cycle and makes the very first tick honour the gate too.
+  // Prefs are a local file read, so they are fetched immediately rather than
+  // behind the poll gate: every instance needs them (the bar chip's metric
+  // comes from here too), and none of them talk to Garmin to get them.
+  Component.onCompleted: root.loadPrefs()
+
   Timer {
     id: startupTimer
     interval: 1500
