@@ -203,10 +203,205 @@ Panel {
     onTriggered: root.copied = false
   }
 
+  // Numbers arrive from a JSON file on disk, so "is this a number" is asked
+  // once, here, and every caller downstream deals in `null` or a real value.
+  function num(v) {
+    if (v === null || v === undefined || v === "") return null
+    var n = Number(v)
+    return isFinite(n) ? n : null
+  }
+
+  // Garmin sends SCREAMING_SNAKE enum values ("VERY_HIGH", "BALANCED"). They
+  // are shouted at the user verbatim nowhere in this panel.
+  function titleCase(value) {
+    var s = String(value || "").replace(/_/g, " ").toLowerCase()
+    if (s === "") return ""
+    return s.replace(/(^|\s)([a-z])/g, function (m, lead, ch) { return lead + ch.toUpperCase() })
+  }
+
+  // "2026-06-20" → a local Date at midnight. Deliberately not `new Date(str)`:
+  // that parses a date-only string as UTC and lands on the previous day for
+  // everyone west of Greenwich, which would shift every strip label by one.
+  function parseDay(value) {
+    var m = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/)
+    if (!m) return null
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  }
+
+  function dayKey(d) {
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2)
+  }
+
+  readonly property var weekdayNames: ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
+  readonly property var monthNames: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+  function fmtDay(value) {
+    var d = root.parseDay(value)
+    if (!d) return String(value || "")
+    return root.monthNames[d.getMonth()] + " " + d.getDate()
+  }
+
+  function fmtTimeOfDay(epochMs) {
+    var n = root.num(epochMs)
+    if (n === null) return ""
+    var d = new Date(n)
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2)
+  }
+
   // ---- Payload accessors (every one tolerates a missing branch)
   readonly property var bodyBattery: root.payload && root.payload.bodyBattery ? root.payload.bodyBattery : null
   readonly property var sleepInfo: root.payload && root.payload.sleep ? root.payload.sleep : null
   readonly property var stepsInfo: root.payload && root.payload.steps ? root.payload.steps : null
+  readonly property var curveData: root.payload && root.payload.curve ? root.payload.curve : null
+  readonly property var hrvInfo: root.payload && root.payload.hrvStatus ? root.payload.hrvStatus : null
+  readonly property var readinessInfo: root.payload && root.payload.readiness ? root.payload.readiness : null
+  readonly property var intensityInfo: root.payload && root.payload.intensityMinutes ? root.payload.intensityMinutes : null
+  readonly property var floorsInfo: root.payload && root.payload.floors ? root.payload.floors : null
+  readonly property var caloriesInfo: root.payload && root.payload.calories ? root.payload.calories : null
+  readonly property var activityInfo: root.payload && root.payload.lastActivity ? root.payload.lastActivity : null
+
+  // History is a list of daily snapshots the helper keeps in its cache. It can
+  // be missing entirely (an older helper), empty (first run), or one entry
+  // long — every consumer below has to survive all three.
+  readonly property var history:
+    root.payload && root.payload.history && root.payload.history.length !== undefined
+      ? root.payload.history : []
+
+  function seriesLength(series) {
+    return series && series.length !== undefined ? series.length : 0
+  }
+
+  readonly property var bbSeries: root.curveData && root.curveData.bodyBattery ? root.curveData.bodyBattery : null
+  readonly property var stressSeries: root.curveData && root.curveData.stress ? root.curveData.stress : null
+  readonly property bool hasCurve:
+    root.seriesLength(root.bbSeries) >= 2 || root.seriesLength(root.stressSeries) >= 2
+
+  // The last stress sample, for the days Garmin gives us a stress curve but
+  // no Body Battery to head the card with.
+  readonly property var lastStress: {
+    var s = root.stressSeries
+    if (root.seriesLength(s) < 1) return null
+    var last = s[s.length - 1]
+    return (last && last.length >= 2) ? root.num(last[1]) : null
+  }
+
+  // The clock range the curve actually covers, so nobody reads a half-day of
+  // samples as a full day.
+  readonly property string curveSpan: {
+    var pick = root.seriesLength(root.bbSeries) >= 2 ? root.bbSeries : root.stressSeries
+    if (root.seriesLength(pick) < 2) return ""
+    var first = pick[0], last = pick[pick.length - 1]
+    var a = root.fmtTimeOfDay(first && first.length ? first[0] : null)
+    var b = root.fmtTimeOfDay(last && last.length ? last[0] : null)
+    return (a === "" || b === "") ? "" : a + "–" + b
+  }
+
+  // ---- History-derived views
+  //
+  // Entries are keyed by date so a gap in the week stays a gap: the strip is
+  // built by walking seven calendar days back from the newest entry, not by
+  // taking the last seven rows of a list that may be missing days.
+  readonly property var historyByDate: {
+    var map = {}
+    for (var i = 0; i < root.history.length; i++) {
+      var e = root.history[i]
+      if (!e) continue
+      var key = String(e.date || "")
+      if (key !== "") map[key] = e
+    }
+    return map
+  }
+
+  // Dated entries, oldest first — the shape the delta comparison wants.
+  readonly property var historySorted: {
+    var out = []
+    for (var i = 0; i < root.history.length; i++) {
+      var e = root.history[i]
+      if (e && String(e.date || "") !== "") out.push(e)
+    }
+    out.sort(function (a, b) { return String(a.date) < String(b.date) ? -1 : 1 })
+    return out
+  }
+
+  readonly property string newestHistoryDate:
+    root.historySorted.length > 0 ? String(root.historySorted[root.historySorted.length - 1].date) : ""
+
+  // Seven slots ending on the newest entry we have. `fixedMax` pins the scale
+  // where the metric has a natural ceiling (a sleep score is out of 100); zero
+  // means "scale to the week", which is what a step count wants.
+  //
+  // Labels are weekdays, never "today": when the payload is stale the newest
+  // entry may be yesterday's, and the footer is the one place that says how
+  // old the data is.
+  function stripFor(field, fixedMax) {
+    if (root.newestHistoryDate === "") return []
+    var end = root.parseDay(root.newestHistoryDate)
+    if (!end) return []
+
+    var slots = []
+    var max = Number(fixedMax) > 0 ? Number(fixedMax) : 0
+    for (var back = 6; back >= 0; back--) {
+      var day = new Date(end.getFullYear(), end.getMonth(), end.getDate() - back)
+      var entry = root.historyByDate[root.dayKey(day)]
+      var value = entry ? root.num(entry[field]) : null
+      if (value !== null && Number(fixedMax) <= 0 && value > max) max = value
+      slots.push({ "label": root.weekdayNames[day.getDay()], "value": value, "present": value !== null, "frac": 0 })
+    }
+
+    for (var i = 0; i < slots.length; i++)
+      slots[i].frac = (slots[i].present && max > 0) ? Math.max(0, Math.min(1, slots[i].value / max)) : 0
+    return slots
+  }
+
+  // Change against the previous day we have a reading for. Only the two most
+  // recent entries are compared, and only if they are within two days of each
+  // other — an arrow against a reading from last week is not a trend.
+  //
+  // Colour marks improvement only. A slightly shorter walk is not an alarm,
+  // and painting it urgent would make the panel cry wolf every evening.
+  function deltaFor(field, lowerIsBetter) {
+    var dated = []
+    for (var i = 0; i < root.historySorted.length; i++) {
+      var v = root.num(root.historySorted[i][field])
+      if (v !== null) dated.push({ "date": String(root.historySorted[i].date), "value": v })
+    }
+    if (dated.length < 2) return { "glyph": "", "tone": "" }
+
+    var latest = dated[dated.length - 1]
+    var prev = dated[dated.length - 2]
+    var a = root.parseDay(prev.date)
+    var b = root.parseDay(latest.date)
+    if (!a || !b) return { "glyph": "", "tone": "" }
+    var gapDays = Math.round((b.getTime() - a.getTime()) / 86400000)
+    if (gapDays < 1 || gapDays > 2) return { "glyph": "", "tone": "" }
+
+    if (latest.value === prev.value) return { "glyph": "→", "tone": "" }
+    var rose = latest.value > prev.value
+    var better = lowerIsBetter ? !rose : rose
+    return { "glyph": rose ? "↗" : "↘", "tone": better ? "accent" : "" }
+  }
+
+  // ---- Threshold bands (the same ones the chip colours by)
+  function batteryTone(v) {
+    if (v === null) return ""
+    if (v >= 60) return "accent"
+    if (v < 30) return "urgent"
+    return ""
+  }
+
+  function readinessTone(v) {
+    if (v === null) return ""
+    if (v >= 75) return "accent"
+    if (v < 35) return "urgent"
+    return ""
+  }
+
+  function hrvTone(status) {
+    var s = String(status || "").toUpperCase()
+    if (s === "BALANCED") return "accent"
+    if (s === "UNBALANCED" || s === "LOW" || s === "POOR") return "urgent"
+    return ""
+  }
 
   readonly property string batteryValue: root.fmtNumber(root.bodyBattery ? root.bodyBattery.current : null)
   readonly property string batteryMeta: {
@@ -236,8 +431,6 @@ Panel {
   readonly property var stepsCount: root.stepsInfo && root.stepsInfo.count !== null && root.stepsInfo.count !== undefined
     ? Number(root.stepsInfo.count) : null
   readonly property bool hasSteps: root.stepsCount !== null && isFinite(root.stepsCount)
-  readonly property string stepsValue:
-    !root.hasSteps ? "—" : root.fmtSteps(root.stepsCount) + " / " + root.fmtSteps(root.stepsGoal)
   readonly property real stepsProgress:
     !root.hasSteps || root.stepsGoal <= 0 ? 0 : Math.max(0, Math.min(1, root.stepsCount / root.stepsGoal))
 
@@ -257,14 +450,252 @@ Panel {
     return "as of " + clock + (root.showStale ? " · stale" : "")
   }
 
-  // Rows are data, not markup: one model keeps the label column aligned and
-  // makes "which rows exist" a single readable list.
-  readonly property var detailRows: [
-    { "label": "Body Battery", "value": root.batteryValue, "meta": root.batteryMeta, "bar": false },
-    { "label": "Sleep", "value": root.sleepValue, "meta": "", "bar": false },
-    { "label": "Steps", "value": root.stepsValue, "meta": "", "bar": true },
-    { "label": "Resting HR", "value": root.restingHrValue, "meta": "", "bar": false }
+  // ---- Which cards, in which order
+  //
+  // The setting is a comma-separated string rather than a list because that is
+  // what the shell's settings schema can round-trip. Unknown tokens are
+  // dropped instead of erroring — a typo should cost you one card, not the
+  // whole panel — and a string that survives none of that falls back to the
+  // default set rather than leaving the body empty.
+  readonly property var knownMetrics: [
+    "curve", "battery", "sleep", "steps", "readiness",
+    "rhr", "hrv", "intensity", "floors", "calories", "activity"
   ]
+  readonly property string defaultMetrics: "curve,sleep,steps,readiness,rhr"
+
+  readonly property var metricTokens: {
+    var raw = String(root.setting("panelMetrics", root.defaultMetrics))
+    var parsed = root.parseMetrics(raw)
+    return parsed.length > 0 ? parsed : root.parseMetrics(root.defaultMetrics)
+  }
+
+  // Past six cards the panel is taller than the numbers are worth, and there
+  // is no scrolling here by design. Density is what gets cut: the seven-day
+  // strips are the first thing to go, since the figure above each one is the
+  // part people actually came for.
+  readonly property bool denseLayout: root.metricTokens.length > 6
+
+  function parseMetrics(raw) {
+    var parts = String(raw || "").split(",")
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+      var token = parts[i].replace(/^\s+|\s+$/g, "").toLowerCase()
+      if (token === "") continue
+      if (root.knownMetrics.indexOf(token) === -1) continue
+      if (out.indexOf(token) !== -1) continue
+      out.push(token)
+    }
+    return out
+  }
+
+  // The body laid out as rows of tokens. A card whose metric is missing never
+  // enters the layout at all, so a hidden card leaves no hole and no gap.
+  //
+  // In dense mode the metric cards pair up two to a row. There is no scrolling
+  // in this panel by design, and eleven full-width cards run off the bottom of
+  // a 1080p screen — a second column buys back the height that the strips
+  // alone could not.
+  readonly property var cardRows: {
+    var rows = []
+    var pending = ""
+    for (var i = 0; i < root.metricTokens.length; i++) {
+      var token = root.metricTokens[i]
+      var card = root.cardFor(token)
+      if (card.show !== true) continue
+
+      // The curve is a chart, not a figure: it always gets the full width.
+      if (card.kind === "curve") {
+        if (pending !== "") { rows.push([pending]); pending = "" }
+        rows.push([token])
+        continue
+      }
+      if (!root.denseLayout) { rows.push([token]); continue }
+      if (pending === "") pending = token
+      else { rows.push([pending, token]); pending = "" }
+    }
+    if (pending !== "") rows.push([pending])
+    return rows
+  }
+
+  // A payload can be `ok` and still carry nothing we were asked to show — a
+  // watch left on the charger all day, or a metric set nobody's account has.
+  // The body says so rather than leaving a hero floating above a separator.
+  readonly property int visibleCardCount: root.cardRows.length
+
+  // ---- Card descriptors
+  //
+  // One function, one card, every string already formatted: the delegate below
+  // only decides where things sit, never what they say. `show: false` means
+  // the payload had nothing for this metric, and the card disappears rather
+  // than sitting there full of em dashes.
+  function cardFor(token) {
+    switch (token) {
+    case "curve": {
+      // The header names whichever line is actually drawn. Garmin can return
+      // a stress day with no Body Battery at all, and a "Body Battery 71"
+      // header over a lone stress curve claims the wrong line.
+      var bb = root.num(root.bodyBattery ? root.bodyBattery.current : null)
+      var bbDrawn = root.seriesLength(root.bbSeries) >= 2
+      return {
+        "kind": "curve",
+        "show": root.hasCurve,
+        "title": bbDrawn ? "Body Battery" : "Stress",
+        "icon": bbDrawn ? "󱐋" : "󰐰",
+        "value": bbDrawn ? root.batteryValue : root.fmtNumber(root.lastStress),
+        "tone": bbDrawn ? root.batteryTone(bb) : "",
+        "caption": root.curveSpan
+      }
+    }
+    case "battery": {
+      var current = root.num(root.bodyBattery ? root.bodyBattery.current : null)
+      return {
+        "kind": "metric",
+        "show": root.bodyBattery !== null,
+        "icon": "󱐋",
+        "title": "Body Battery",
+        "value": root.batteryValue,
+        "caption": root.batteryMeta,
+        "tone": root.batteryTone(current),
+        "strip": root.denseLayout ? [] : root.stripFor("bodyBatteryHigh", 100)
+      }
+    }
+    case "sleep": {
+      var score = root.num(root.sleepInfo ? root.sleepInfo.score : null)
+      var duration = root.num(root.sleepInfo ? root.sleepInfo.durationMin : null)
+      var d = root.deltaFor("sleepScore", false)
+      return {
+        "kind": "metric",
+        "show": score !== null || duration !== null,
+        "icon": "󰒲",
+        "title": "Sleep",
+        "value": root.sleepValue,
+        "delta": d.glyph,
+        "deltaTone": d.tone,
+        "strip": root.denseLayout ? [] : root.stripFor("sleepScore", 100)
+      }
+    }
+    case "steps": {
+      var d2 = root.deltaFor("steps", false)
+      return {
+        "kind": "metric",
+        "show": root.hasSteps,
+        "icon": "󰖃",
+        "title": "Steps",
+        "value": root.fmtSteps(root.stepsCount),
+        "caption": "goal " + root.fmtSteps(root.stepsGoal),
+        "meterPercent": root.stepsProgress * 100,
+        "delta": d2.glyph,
+        "deltaTone": d2.tone,
+        "strip": root.denseLayout ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0))
+      }
+    }
+    case "readiness": {
+      var rs = root.num(root.readinessInfo ? root.readinessInfo.score : null)
+      var level = root.titleCase(root.readinessInfo ? root.readinessInfo.level : "")
+      return {
+        "kind": "metric",
+        "show": rs !== null || level !== "",
+        "icon": "󰓅",
+        "title": "Training readiness",
+        "value": root.fmtNumber(rs),
+        "caption": level,
+        "tone": root.readinessTone(rs)
+      }
+    }
+    case "rhr": {
+      var d3 = root.deltaFor("restingHr", true)
+      return {
+        "kind": "metric",
+        "show": root.num(root.payload ? root.payload.restingHr : null) !== null,
+        "icon": "󰗶",
+        "title": "Resting HR",
+        "value": root.restingHrValue,
+        "delta": d3.glyph,
+        "deltaTone": d3.tone
+      }
+    }
+    case "hrv": {
+      var last = root.num(root.hrvInfo ? root.hrvInfo.lastNightAvg : null)
+      var weekly = root.num(root.hrvInfo ? root.hrvInfo.weeklyAvg : null)
+      var status = root.titleCase(root.hrvInfo ? root.hrvInfo.status : "")
+      var parts = []
+      if (status !== "") parts.push(status)
+      if (weekly !== null) parts.push("7-day avg " + root.fmtNumber(weekly) + " ms")
+      return {
+        "kind": "metric",
+        "show": last !== null || status !== "",
+        "icon": "󰐰",
+        "title": "HRV",
+        "value": last === null ? "—" : root.fmtNumber(last) + " ms",
+        "caption": parts.join(" · "),
+        "tone": root.hrvTone(root.hrvInfo ? root.hrvInfo.status : "")
+      }
+    }
+    case "intensity": {
+      var weeklyMin = root.num(root.intensityInfo ? root.intensityInfo.weekly : null)
+      var goal = root.num(root.intensityInfo ? root.intensityInfo.goal : null)
+      return {
+        "kind": "metric",
+        "show": weeklyMin !== null,
+        "icon": "󰑮",
+        "title": "Intensity minutes",
+        "value": root.fmtNumber(weeklyMin),
+        "caption": goal === null ? "this week" : "weekly goal " + root.fmtNumber(goal),
+        "meterPercent": (goal === null || goal <= 0 || weeklyMin === null)
+          ? -1 : Math.min(100, weeklyMin / goal * 100)
+      }
+    }
+    case "floors": {
+      var count = root.num(root.floorsInfo ? root.floorsInfo.count : null)
+      var fgoal = root.num(root.floorsInfo ? root.floorsInfo.goal : null)
+      return {
+        "kind": "metric",
+        "show": count !== null,
+        "icon": "󱅈",
+        "title": "Floors",
+        "value": root.fmtNumber(count),
+        "caption": fgoal === null ? "" : "goal " + root.fmtNumber(fgoal),
+        "meterPercent": (fgoal === null || fgoal <= 0 || count === null)
+          ? -1 : Math.min(100, count / fgoal * 100)
+      }
+    }
+    case "calories": {
+      var total = root.num(root.caloriesInfo ? root.caloriesInfo.total : null)
+      var active = root.num(root.caloriesInfo ? root.caloriesInfo.active : null)
+      return {
+        "kind": "metric",
+        "show": total !== null || active !== null,
+        "icon": "󰈸",
+        "title": "Calories",
+        "value": total === null ? "—" : root.fmtSteps(total) + " kcal",
+        "caption": active === null ? "" : root.fmtSteps(active) + " active"
+      }
+    }
+    case "activity": {
+      // The date is not decoration. The last activity can be weeks old, and a
+      // duration with no date on it reads as "you did this today".
+      var type = root.titleCase(root.activityInfo ? root.activityInfo.type : "")
+      var mins = root.num(root.activityInfo ? root.activityInfo.durationMin : null)
+      var km = root.num(root.activityInfo ? root.activityInfo.distanceKm : null)
+      var when = root.activityInfo ? String(root.activityInfo.date || "") : ""
+      var meta = []
+      if (mins !== null) meta.push(root.fmtDuration(mins))
+      if (km !== null) meta.push(km.toFixed(2) + " km")
+      meta.push(when === "" ? "date unknown" : root.fmtDay(when))
+      return {
+        "kind": "metric",
+        "show": root.activityInfo !== null && (type !== "" || mins !== null || km !== null),
+        "icon": "󰜎",
+        // Two cards to a row leaves no space for "Last activity" — it elides
+        // to "Last a…", which reads like a rendering bug rather than a title.
+        "title": root.denseLayout ? "Activity" : "Last activity",
+        "value": type === "" ? "—" : type,
+        "caption": meta.join(" · ")
+      }
+    }
+    }
+    return { "kind": "metric", "show": false }
+  }
 
   // ---- Palette (taken off the bar so a recoloured bar carries through)
   readonly property color foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -282,9 +713,9 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     // Wide enough that the full helper path wraps at its own slashes rather
-    // than mid-word; it still takes three lines. fittedContentWidth shrinks
-    // this further on a narrow screen.
-    contentWidth: panel.fittedContentWidth(Style.space(400))
+    // than mid-word, and that seven day-bars still read as bars rather than
+    // hairlines. fittedContentWidth shrinks this further on a narrow screen.
+    contentWidth: panel.fittedContentWidth(Style.space(440))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -441,87 +872,101 @@ Panel {
           font.pixelSize: Style.font.body
         }
 
-        // ---- Detail rows: live / stale
+        // ---- Metric cards: live / stale
+        //
+        // Rows come from `cardRows`, which has already dropped the metrics
+        // this payload has nothing for and decided how many cards share a
+        // row. Everything a card shows is a formatted string by the time it
+        // gets here — the delegates only place things.
         Column {
-          id: rowsColumn
+          id: cardsColumn
           visible: root.showRows
           width: parent.width
-          spacing: Style.space(10)
+          spacing: Style.space(8)
 
           // No section header here: the hero already says "Today", and two
           // TODAY labels stacked on top of each other just read as a bug.
           PanelSeparator { foreground: root.foreground }
 
-          Repeater {
-            model: root.detailRows
+          Text {
+            visible: root.visibleCardCount === 0
+            width: parent.width
+            text: "No figures for today yet."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
 
-            // Label left, value right, with an optional goal bar underneath —
-            // the same two-column read on every row, so the numbers line up
-            // into one scannable column.
-            Column {
-              id: row
+          Repeater {
+            model: root.cardRows
+
+            Row {
+              id: cardRow
               required property var modelData
 
-              width: rowsColumn.width
-              spacing: Style.space(4)
+              width: cardsColumn.width
+              spacing: Style.space(8)
 
-              Item {
-                width: parent.width
-                implicitHeight: Math.max(rowLabel.implicitHeight, rowValue.implicitHeight)
+              readonly property real cellWidth:
+                (cardRow.width - cardRow.spacing * (cardRow.modelData.length - 1)) / cardRow.modelData.length
 
-                Text {
-                  id: rowLabel
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: row.modelData.label
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
+              Repeater {
+                model: cardRow.modelData
 
-                Row {
-                  id: rowValue
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(8)
+                Item {
+                  id: cardSlot
+                  required property string modelData
 
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: text !== ""
-                    text: row.modelData.meta
-                    color: Qt.darker(root.foreground, 2.0)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                  readonly property var card: root.cardFor(cardSlot.modelData)
+                  readonly property bool isCurve: cardSlot.card.kind === "curve"
+
+                  width: cardRow.cellWidth
+                  height: isCurve ? curveCard.implicitHeight : metricCard.implicitHeight
+
+                  CurveCard {
+                    id: curveCard
+                    width: parent.width
+                    height: implicitHeight
+                    visible: cardSlot.isCurve
+                    // Gates the Canvas: only the card that is actually on
+                    // screen pays for a paint texture.
+                    active: visible
+                    icon: cardSlot.card.icon || ""
+                    title: cardSlot.card.title || ""
+                    value: cardSlot.card.value || "—"
+                    tone: cardSlot.card.tone || ""
+                    caption: cardSlot.card.caption || ""
+                    bodyBatterySeries: root.bbSeries
+                    stressSeries: root.stressSeries
+                    foreground: root.foreground
+                    accentColor: root.accentColor
+                    urgentColor: root.urgentColor
+                    dim: root.dim
+                    fontFamily: root.fontFamily
+                    muted: root.showStale
                   }
 
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: row.modelData.value
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
+                  MetricCard {
+                    id: metricCard
+                    width: parent.width
+                    height: implicitHeight
+                    visible: !cardSlot.isCurve
+                    icon: cardSlot.card.icon || ""
+                    title: cardSlot.card.title || ""
+                    value: cardSlot.card.value || "—"
+                    caption: cardSlot.card.caption || ""
+                    delta: cardSlot.card.delta || ""
+                    deltaTone: cardSlot.card.deltaTone || ""
+                    tone: cardSlot.card.tone || ""
+                    meterPercent: cardSlot.card.meterPercent === undefined ? -1 : cardSlot.card.meterPercent
+                    strip: cardSlot.card.strip === undefined ? [] : cardSlot.card.strip
+                    foreground: root.foreground
+                    accentColor: root.accentColor
+                    urgentColor: root.urgentColor
+                    dim: root.dim
+                    fontFamily: root.fontFamily
+                    muted: root.showStale
                   }
-                }
-              }
-
-              // Thin progress track against the step goal. Hidden when there is
-              // no step count at all, so an empty track never implies "zero
-              // steps today".
-              Rectangle {
-                visible: row.modelData.bar === true && root.hasSteps
-                width: parent.width
-                height: Math.max(2, Style.space(3))
-                radius: height / 2
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
-
-                Rectangle {
-                  width: parent.width * root.stepsProgress
-                  height: parent.height
-                  radius: parent.radius
-                  color: root.showStale ? root.dim : root.accentColor
-                  // No width Behavior here: `detailRows` is rebuilt whenever any
-                  // value changes, so the Repeater recreates this delegate and
-                  // an animation would never have an old width to run from.
                 }
               }
             }
