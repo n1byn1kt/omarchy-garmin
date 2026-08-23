@@ -1,7 +1,7 @@
 # Garmin for Omarchy
 
-Today's Garmin health at a glance: **Body Battery** in the bar, and sleep score,
-steps and resting heart rate in a click-away panel.
+Today's Garmin health at a glance: **Body Battery** in the bar — or steps, sleep
+or readiness, your pick — and a click-away panel of the metrics you care about.
 
 ![Garmin panel and bar chip](preview.png)
 
@@ -9,20 +9,31 @@ steps and resting heart rate in a click-away panel.
 
 ## What it shows
 
-**In the bar** — a bolt glyph and your current Body Battery:
+**In the bar** — a glyph and one number. Body Battery by default; `barMetric`
+switches it to steps, sleep score or training readiness, and the glyph follows.
 
 ![Garmin bar chip](docs/bar-chip.png)
 
-The number is coloured by the reading, not by the plumbing: accent when you have
-battery left (≥ 60), urgent when you are nearly empty (< 30), plain in between.
-Anything degraded — stale data, an unreachable API, a session that needs a new
-login — goes plain and dim, so a broken helper never looks like a health alarm.
-A trailing `·` marks data that is no longer fresh. Hover for a tooltip with the
-state, the last error (if any), and the timestamp.
+The number is coloured by the reading, not by the plumbing: accent when it is
+good news, urgent when it is bad news, plain in between. Body Battery and sleep
+score use ≥ 60 / < 30, readiness ≥ 75 / < 35, and steps only ever go accent —
+once you pass your goal. Being short of a step goal at 11am is not an emergency,
+so steps have no urgent band at all. Anything degraded — stale data, an
+unreachable API, a session that needs a new login — goes plain and dim, so a
+broken helper never looks like a health alarm. A trailing `·` marks data that is
+no longer fresh. Hover for a tooltip with the state, the last error (if any),
+and the timestamp.
 
-**In the panel** — Body Battery with its daily low–high range, sleep score and
-duration, steps against your Garmin step goal (with a progress bar), and resting
-heart rate, plus a footer timestamp and a Refresh button.
+**In the panel** — a stack of cards, in the order `panelMetrics` asks for them:
+the day's Body Battery and stress curve, sleep score and duration, steps against
+your Garmin step goal, training readiness, resting HR, and more (full list under
+[Settings](#settings)). Cards carry a seven-day strip and a `↗ ↘ →` delta where
+the cache has the history for it, plus a footer timestamp and a Refresh button.
+
+Deltas and strips compare the **two newest days in the local cache**, which is
+normally today against yesterday. They are drawn from cached history, not from
+the live fetch, so a stale payload still shows you a real comparison — just an
+older one; the footer's `· stale` is what tells you so.
 
 **Interactions**
 
@@ -34,6 +45,26 @@ heart rate, plus a footer timestamp and a Refresh button.
 | `r` (panel focused) | Refresh |
 | `c` (panel focused) | Copy the suggested command to the clipboard |
 | `qs ipc call garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
+
+---
+
+## What's new in 0.2.0
+
+- **The bar chip is yours to choose.** `barMetric` puts steps, sleep score or
+  training readiness in the bar instead of Body Battery, with its own glyph and
+  its own sensible threshold colours.
+- **The panel is a deck of cards you order yourself.** `panelMetrics` picks from
+  eleven metrics — including a day-long Body Battery + stress curve, HRV status,
+  weekly intensity minutes, floors, calories and your last activity — and shows
+  them in the order you list.
+- **Seven days of context.** Cards carry a seven-day strip and a `↗ ↘ →` delta
+  against the previous cached day, kept in a small local history file.
+- **More of your day fetched, none of it fatal.** Each new Garmin endpoint is
+  asked for separately; one failing endpoint nulls its own card and never takes
+  the rest of the panel down with it.
+
+Existing settings keep working unchanged, and nothing about the failure states,
+the tokens or the cache moved.
 
 ---
 
@@ -59,9 +90,12 @@ python3 -m venv ~/.local/share/garmin-widget/venv
 ```
 
 Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
-four calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
-`get_sleep_data()`) have been stable for a long time — but 0.3.11 is the
-version the widget was tested on.
+calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
+`get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
+`get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
+`get_last_activity()`) have been stable for a long time, and each one is asked
+for separately so a renamed endpoint costs you a card rather than the widget —
+but 0.3.11 is the version the widget was tested on.
 
 Nothing is installed system-wide, and nothing outside your home directory is
 touched. The helper re-execs itself into that venv automatically when
@@ -122,8 +156,10 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 | Setting | Type | Default | What it does |
 |---|---|---|---|
 | `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes** — anything lower (including `0`, which a typo makes easy) is clamped, since Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
-| `showSteps` | boolean | `false` | Also show today's steps next to Body Battery in the bar (e.g. `⚡61  8.0k`). |
+| `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. |
+| `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. `⚡61  8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
+| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the seven-day strips are dropped to keep the panel a sane height. |
 
 On a multi-monitor setup the widget appears on every bar, and it is designed so
 that only **one** instance polls, fanning the result out to the others — one
@@ -144,6 +180,7 @@ Everything this plugin writes lives under your home directory:
 |---|---|
 | `~/.config/garmin-widget/tokens.json` | Garmin OAuth tokens, mode `0600`. No password. |
 | `~/.cache/garmin-widget/last.json` | Last successful reading, so the bar can show yesterday's numbers while offline. |
+| `~/.cache/garmin-widget/history.json` | Up to seven daily snapshots (sleep score, steps, Body Battery high, resting HR) — the source of the panel's strips and deltas. |
 | `~/.local/share/garmin-widget/venv/` | The dedicated virtualenv holding `garminconnect`. |
 
 ---
@@ -212,9 +249,10 @@ python3 -m pytest tests/ -v          # helper unit tests, no network
 omarchy plugin validate .            # manifest schema check
 ```
 
-The plugin is five files: `manifest.json`, `Service.qml` (poller and state
-machine), `BarWidget.qml` (the chip), `Panel.qml` (the detail panel), and the
-Python helper in `bin/garmin-widget`. The helper's contract is that every
+The plugin is `manifest.json`, `Service.qml` (poller and state machine),
+`BarWidget.qml` (the chip), `Panel.qml` (the detail panel) with its
+`MetricCard.qml` / `Meter.qml` / `CurveCard.qml` pieces, and the Python helper
+in `bin/garmin-widget`. The helper's contract is that every
 subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.
 
