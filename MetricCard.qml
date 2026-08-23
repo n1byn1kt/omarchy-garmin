@@ -71,6 +71,7 @@ Rectangle {
       implicitHeight: Math.max(iconText.implicitHeight, titleText.implicitHeight, valueRow.implicitHeight)
 
       Text {
+        textFormat: Text.PlainText
         id: iconText
         visible: card.icon !== ""
         text: card.icon
@@ -82,6 +83,7 @@ Rectangle {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: titleText
         text: card.title
         color: card.dim
@@ -102,6 +104,7 @@ Rectangle {
         spacing: Style.space(5)
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           visible: card.delta !== ""
           text: card.delta
@@ -111,6 +114,7 @@ Rectangle {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: card.value
           color: card.toneColor(card.tone)
@@ -130,6 +134,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: card.caption !== ""
       width: parent.width
       text: card.caption
@@ -189,6 +194,7 @@ Rectangle {
           }
 
           Text {
+            textFormat: Text.PlainText
             id: slotLabel
             anchors.top: track.bottom
             anchors.topMargin: Style.space(2)

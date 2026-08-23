@@ -227,3 +227,159 @@ def test_fetch_secures_tokens_immediately_after_login(home, fake_garmin,
     rc, out = run(mod, ["fetch"], capsys)
     assert out["ok"] is True
     assert len(seen) >= 2
+
+
+# --- symlinks and special files at the fixed paths are refused ---------------
+
+def test_stale_cache_behind_a_symlink_is_refused(home, fake_garmin, capsys):
+    """A symlink planted at last.json must not make fetch re-emit another file."""
+    mod = load_helper()
+    _with_tokens(mod)
+    victim = home / "victim.json"
+    victim.write_text(json.dumps(HOSTILE))
+    mod.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CACHE_PATH.symlink_to(victim)
+    fake_garmin.login_exc = ConnectionError("boom")
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is False          # no stale re-emit, plain error instead
+    assert "evil.example" not in json.dumps(out)
+
+
+def test_oversize_cache_is_refused(home, fake_garmin, capsys):
+    mod = load_helper()
+    _with_tokens(mod)
+    _seed_cache(mod, {"ok": True, "pad": "x" * (mod.MAX_CACHE_BYTES + 1)})
+    fake_garmin.login_exc = ConnectionError("boom")
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is False
+
+
+def test_secure_tokens_does_not_chmod_through_a_symlink(home):
+    mod = load_helper()
+    victim = home / "victim"
+    victim.write_text("s3kr1t")
+    victim.chmod(0o644)
+    mod.TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.TOKENS_PATH.symlink_to(victim)
+    mod._secure_tokens()               # best-effort: must skip, not follow
+    assert (victim.stat().st_mode & 0o777) == 0o644
+
+
+def test_prefs_behind_a_symlink_fall_back_to_defaults(home, capsys):
+    mod = load_helper()
+    victim = home / "victim.json"
+    victim.write_text(json.dumps({"barMetric": "steps"}))
+    mod.PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.PREFS_PATH.symlink_to(victim)
+    rc, out = run(mod, ["prefs", "get"], capsys)
+    assert out.get("barMetric") is None or "barMetric" not in out
+
+
+# --- API strings are clipped to label size -----------------------------------
+
+def test_api_display_strings_are_clipped(home):
+    mod = load_helper()
+    long = "A" * 5000
+    hrv = mod.build_hrv({"hrvSummary": {"lastNightAvg": 50, "status": long}})
+    assert len(hrv["status"]) == mod.STR_CLIP
+    rdy = mod.build_readiness([{"score": 80, "level": long}])
+    assert len(rdy["level"]) == mod.STR_CLIP
+    act = mod.build_last_activity({"activityType": {"typeKey": long},
+                                   "duration": 60, "distance": 1000})
+    assert len(act["type"]) == mod.STR_CLIP
+
+
+# --- every QML Text sink renders plain text ----------------------------------
+
+def test_every_qml_text_element_is_plaintext():
+    """Qt's AutoText default sniffs HTML out of strings; none of ours is HTML."""
+    import pathlib, re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for qml in root.glob("*.qml"):
+        lines = qml.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r"^\s*Text \{\s*$", line):
+                block = "\n".join(lines[i:i + 3])
+                assert "Text.PlainText" in block, f"{qml.name}:{i + 1} lacks textFormat"
+
+
+# --- grok-review round: fifos, parent symlinks, cache clipping ---------------
+
+def test_fifo_at_cache_path_is_refused_not_hung(home, fake_garmin, capsys):
+    """O_RDONLY on a fifo blocks without O_NONBLOCK — this must return, fast."""
+    mod = load_helper()
+    _with_tokens(mod)
+    mod.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(mod.CACHE_PATH)
+    fake_garmin.login_exc = ConnectionError("boom")
+    rc, out = run(mod, ["fetch"], capsys)   # would hang forever if broken
+    assert out["ok"] is False
+
+
+def test_fifo_at_tokens_path_does_not_hang_secure_tokens(home):
+    mod = load_helper()
+    mod.TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(mod.TOKENS_PATH)
+    mod._secure_tokens()                    # best-effort: must return, not block
+
+
+def test_symlinked_plugin_dir_refuses_file_reads(home, fake_garmin, capsys):
+    """A symlink at ~/.cache/garmin-widget itself must not redirect last.json."""
+    mod = load_helper()
+    _with_tokens(mod)
+    real = home / "elsewhere"
+    real.mkdir()
+    (real / "last.json").write_text(json.dumps(HOSTILE))
+    mod.CACHE_PATH.parent.parent.mkdir(parents=True, exist_ok=True)
+    mod.CACHE_PATH.parent.symlink_to(real)
+    fake_garmin.login_exc = ConnectionError("boom")
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is False
+    assert "evil.example" not in json.dumps(out)
+
+
+def test_secure_tokens_repairs_an_unreadable_file(home):
+    """chmod(2) needs no read bit; a 0000 tokens.json must still get fixed."""
+    mod = load_helper()
+    mod.TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.TOKENS_PATH.write_text("{}")
+    mod.TOKENS_PATH.chmod(0)
+    mod._secure_tokens()
+    assert (mod.TOKENS_PATH.stat().st_mode & 0o777) == 0o600
+
+
+def test_stale_cache_strings_are_clipped_everywhere(home, fake_garmin, capsys):
+    mod = load_helper()
+    _with_tokens(mod)
+    long = "B" * 5000
+    _seed_cache(mod, {"ok": True, "asOf": long,
+                      "lastActivity": {"type": long, "date": long},
+                      "hrvStatus": {"status": long},
+                      "nested": [{"deep": long}]})
+    fake_garmin.login_exc = ConnectionError("boom")
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["stale"] is True
+    blob = json.dumps(out)
+    assert "B" * (mod.STR_CLIP + 1) not in blob
+
+
+def test_activity_date_is_clipped(home):
+    mod = load_helper()
+    act = mod.build_last_activity({"activityType": {"typeKey": "run"},
+                                   "duration": 60, "distance": 1000,
+                                   "startTimeLocal": "X" * 5000})
+    assert len(act["date"]) == mod.STR_CLIP
+
+
+def test_write_through_symlinked_plugin_dir_is_refused(home, fake_garmin, capsys):
+    """Reads through a symlinked garmin-widget dir are refused; writes must be too."""
+    mod = load_helper()
+    _with_tokens(mod)
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    real = home / "elsewhere"
+    real.mkdir()
+    mod.CACHE_PATH.parent.parent.mkdir(parents=True, exist_ok=True)
+    mod.CACHE_PATH.parent.symlink_to(real)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is True                 # fetch itself still succeeds
+    assert list(real.iterdir()) == []        # nothing written through the link

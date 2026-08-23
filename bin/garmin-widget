@@ -8,6 +8,7 @@ category in: deps | no-tokens | auth-expired | offline | api-error.
 import datetime
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -24,6 +25,14 @@ HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
 HISTORY_DAYS = 7
 CURVE_POINTS = 96   # the panel's Canvas is ~300px wide; more is wasted JSON
 
+# Local JSON files are read whole before parsing, so a grown (or planted)
+# file is a memory bill the widget pays on every poll. Honest content is
+# nowhere near these: a full cache with history runs ~50KB, prefs ~200 bytes.
+MAX_CACHE_BYTES = 4 * 1024 * 1024
+MAX_PREFS_BYTES = 64 * 1024
+
+STR_CLIP = 80  # display strings taken from the API: label-sized, not data-sized
+
 try:
     import garminconnect  # noqa: F401
     HAS_GARMINCONNECT = True
@@ -33,6 +42,99 @@ except Exception:
 def emit(obj) -> int:
     print(json.dumps(obj))
     return 0
+
+
+def _clip(v, limit=STR_CLIP):
+    """A short display string, or None. API strings get a length budget."""
+    return v[:limit] if isinstance(v, str) else None
+
+
+def _clip_strings(v):
+    """Every string anywhere in a JSON value, clipped to the label budget.
+
+    Applied to a re-emitted cache payload: the live fetch clips at the few
+    places strings enter, but a cached file is one blob whose every string
+    is somebody's choice. No honest value in the payload is longer.
+    """
+    if isinstance(v, str):
+        return v[:STR_CLIP]
+    if isinstance(v, dict):
+        return {k[:STR_CLIP]: _clip_strings(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_clip_strings(x) for x in v]
+    return v
+
+
+def _open_regular(path: Path, *, directory=False) -> int:
+    """An fd for `path`, refusing symlinks and special files.
+
+    Everything under ~/.config and ~/.cache is this user's own, but a
+    symlink planted at one of these fixed paths must not redirect a read,
+    write or chmod at some other file. O_NOFOLLOW makes a symlink fail the
+    open itself (ELOOP); O_NONBLOCK makes a planted fifo open instead of
+    blocking forever waiting for a writer, so the fstat can actually reject
+    it (and devices) — without it the check is unreachable. From the open
+    on, the caller works on the fd, so there is no re-check-the-path race.
+
+    For file opens the immediate parent is opened O_NOFOLLOW too and the
+    leaf resolved relative to it (dir_fd): O_NOFOLLOW alone covers only the
+    final component, so a symlink planted *at the garmin-widget directory
+    itself* would silently redirect every file inside it. Ancestors above
+    that (~/.config, ~/.cache) are allowed to be symlinks — pointing those
+    at another disk is a legitimate setup this helper did not create.
+    """
+    base = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
+    if directory:
+        fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | base)
+    else:
+        parent_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | base)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | base, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+    try:
+        st = os.fstat(fd)
+        ok = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+        if not ok:
+            raise OSError(f"not a {'directory' if directory else 'regular file'}: {path}")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _chmod_guarded(path: Path, mode: int, *, directory=False) -> None:
+    try:
+        fd = _open_regular(path, directory=directory)
+    except PermissionError:
+        # A 0000/0200 file can't be opened O_RDONLY, but repairing exactly
+        # that is _secure_tokens' job — chmod(2) itself needs no read bit.
+        # Fall back to a path chmod behind an lstat type check: a small
+        # window reopens between check and chmod, but the alternative is a
+        # credential file stuck unreadable forever.
+        st = os.lstat(str(path))
+        ok = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+        if not ok:
+            raise OSError(f"not a {'directory' if directory else 'regular file'}: {path}")
+        os.chmod(str(path), mode)
+        return
+    try:
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def _read_json_guarded(path: Path, cap: int):
+    """json.loads of a regular file of sane size; raises on anything else.
+
+    Callers already wrap every local read in try/except and treat failure
+    as "no file" — a refused symlink or an oversize file lands in the same
+    branch as a torn write.
+    """
+    with os.fdopen(_open_regular(path), "r") as fh:
+        if os.fstat(fh.fileno()).st_size > cap:
+            raise OSError(f"file too large: {path}")
+        return json.loads(fh.read(cap + 1))
 
 def cmd_status() -> int:
     return emit({"ok": True, "deps": HAS_GARMINCONNECT, "tokens": TOKENS_PATH.exists()})
@@ -218,10 +320,9 @@ def build_hrv(hrv):
     s = _get(hrv, "hrvSummary")
     if not isinstance(s, dict):
         return None
-    status = s.get("status")
     out = {"lastNightAvg": _round(s.get("lastNightAvg")),
            "weeklyAvg": _round(s.get("weeklyAvg")),
-           "status": status if isinstance(status, str) else None}
+           "status": _clip(s.get("status"))}
     return out if any(v is not None for v in out.values()) else None
 
 
@@ -230,10 +331,10 @@ def build_readiness(readiness):
     r = readiness[0] if isinstance(readiness, list) and readiness else readiness
     if not isinstance(r, dict):
         return None
-    score, level = _round(r.get("score")), r.get("level")
-    if score is None and not isinstance(level, str):
+    score, level = _round(r.get("score")), _clip(r.get("level"))
+    if score is None and level is None:
         return None
-    return {"score": score, "level": level if isinstance(level, str) else None}
+    return {"score": score, "level": level}
 
 
 def build_intensity(intensity):
@@ -260,10 +361,10 @@ def build_last_activity(act):
     type_key = _get(act, "activityType", "typeKey")
     start = act.get("startTimeLocal")
     return {
-        "type": type_key if isinstance(type_key, str) else None,
+        "type": _clip(type_key),
         "durationMin": round(dur / 60) if dur else None,
         "distanceKm": round(dist / 1000, 2) if dist else None,
-        "date": start.split(" ")[0].split("T")[0] if isinstance(start, str) else None,
+        "date": _clip(start.split(" ")[0].split("T")[0]) if isinstance(start, str) else None,
     }
 
 
@@ -348,11 +449,11 @@ def _secure_tokens() -> None:
     so the mode is re-asserted after every call that can rewrite the file.
     """
     try:
-        TOKENS_PATH.chmod(0o600)
+        _chmod_guarded(TOKENS_PATH, 0o600)
         # Also the directory: installs made by an earlier version of this
         # helper left it at 0755, and fetch is the code path that actually
         # runs on those machines.
-        TOKENS_PATH.parent.chmod(0o700)
+        _chmod_guarded(TOKENS_PATH.parent, 0o700, directory=True)
     except OSError:
         pass
 
@@ -360,7 +461,7 @@ def _secure_config_dir() -> None:
     """Create ~/.config/garmin-widget as 0700 (and tighten it if it exists)."""
     try:
         TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        TOKENS_PATH.parent.chmod(0o700)
+        _chmod_guarded(TOKENS_PATH.parent, 0o700, directory=True)
     except OSError:
         pass
 
@@ -393,13 +494,17 @@ def _load_cache():
     which carries no attacker-chosen content by definition.
     """
     try:
-        cached = json.loads(CACHE_PATH.read_text())
+        cached = _read_json_guarded(CACHE_PATH, MAX_CACHE_BYTES)
     except Exception:
         return None
     if not isinstance(cached, dict):
         return None
     hint = cached.pop("hint", None)
     cached.pop("detail", None)
+    # The rest of the cached payload is still strings someone else may have
+    # chosen: every one of them gets the same label-sized budget the live
+    # build_* path applies, walked recursively so nothing rides in nested.
+    cached = _clip_strings(cached)
     if isinstance(hint, str) and hint in SAFE_HINTS:
         cached["hint"] = hint
     return cached
@@ -462,21 +567,22 @@ def _atomic_write(path: Path, obj, prefix: str) -> None:
     try:
         # The cache holds days of health data; v0.1 installs created this
         # directory at 0755, so the mode is re-asserted, not just requested.
+        # No inner try: reads through a symlinked plugin dir are refused, so
+        # writes through one must be too — a raise here lands in the outer
+        # best-effort except and the write is skipped rather than redirected.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+        _chmod_guarded(path.parent, 0o700, directory=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent),
                                    prefix=prefix, suffix=".json")
         with os.fdopen(fd, "w") as fh:
             json.dump(obj, fh)
+            # mkstemp already made it 0600 and os.replace preserves that,
+            # but these files hold days of health data, so the mode is
+            # asserted rather than assumed — on the fd, before the file
+            # becomes reachable at `path`, so there is nothing to swap.
+            os.fchmod(fh.fileno(), 0o600)
         os.replace(tmp, path)  # same directory, so this is atomic
         tmp = None
-        # mkstemp already made it 0600 and os.replace preserves that, but
-        # these files hold days of health data, so the mode is asserted
-        # rather than assumed.
-        os.chmod(path, 0o600)
     except Exception:
         pass  # best-effort; must never break fetch
     finally:
@@ -498,7 +604,7 @@ def _load_history():
     that reads as "backfill not attempted yet" and is rewritten wrapped.
     """
     try:
-        data = json.loads(HISTORY_PATH.read_text())
+        data = _read_json_guarded(HISTORY_PATH, MAX_CACHE_BYTES)
     except Exception:
         return [], False
     backfilled = False
@@ -665,7 +771,7 @@ def _read_prefs():
     falls the panel back to the shell.json setting rather than to nothing.
     """
     try:
-        data = json.loads(PREFS_PATH.read_text())
+        data = _read_json_guarded(PREFS_PATH, MAX_PREFS_BYTES)
     except Exception:
         return {}
     if not isinstance(data, dict):

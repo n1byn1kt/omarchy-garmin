@@ -94,6 +94,7 @@ Rectangle {
       implicitHeight: Math.max(curveIcon.implicitHeight, curveTitle.implicitHeight, curveValue.implicitHeight)
 
       Text {
+        textFormat: Text.PlainText
         id: curveIcon
         visible: card.icon !== ""
         text: card.icon
@@ -105,6 +106,7 @@ Rectangle {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: curveTitle
         text: card.title
         color: card.dim
@@ -119,6 +121,7 @@ Rectangle {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: curveValue
         text: card.value
         color: card.toneColor(card.tone)
@@ -245,6 +248,7 @@ Rectangle {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
             text: "Body Battery"
             color: card.dim
@@ -266,6 +270,7 @@ Rectangle {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
             text: "Stress"
             color: card.dim
@@ -276,6 +281,7 @@ Rectangle {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: spanText
         visible: card.caption !== ""
         anchors.right: parent.right

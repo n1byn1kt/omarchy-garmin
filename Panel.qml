@@ -1144,6 +1144,7 @@ Panel {
           }
           iconComponent: Component {
             Text {
+              textFormat: Text.PlainText
               // nf-md-triangle (U+F0536): evokes Garmin's delta mark without
               // reproducing the trademarked logo. Metric glyphs stay per-metric.
               text: "󰔶"
@@ -1163,6 +1164,7 @@ Panel {
           PanelSeparator { foreground: root.foreground }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.guidanceTitle
             color: root.foreground
@@ -1194,6 +1196,7 @@ Panel {
               borderSpec: Border.controlSpec("normal", root.foreground, root.accentColor)
 
               Text {
+                textFormat: Text.PlainText
                 id: commandText
                 anchors.left: parent.left
                 anchors.right: parent.right
@@ -1229,6 +1232,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.lastError !== ""
             width: parent.width
             text: root.lastError
@@ -1248,6 +1252,7 @@ Panel {
           PanelSeparator { foreground: root.foreground }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "Can't reach Garmin Connect."
             color: root.foreground
@@ -1257,6 +1262,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.lastError !== ""
             width: parent.width
             text: root.lastError
@@ -1268,6 +1274,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.showLoading && !root.editMode
           width: parent.width
           text: "Checking…"
@@ -1296,6 +1303,7 @@ Panel {
           // dashes reads as "the watch hasn't uploaded" rather than as a
           // broken panel. Caption styling on purpose: nothing has gone wrong.
           Text {
+            textFormat: Text.PlainText
             visible: root.emptyToday && root.visibleCardCount > 0
             width: parent.width
             text: "No data from your watch yet today — showing your week."
@@ -1306,6 +1314,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.visibleCardCount === 0
             width: parent.width
             text: "No figures for today yet."
@@ -1449,6 +1458,7 @@ Panel {
           PanelSeparator { foreground: root.foreground }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "BAR CHIP"
             color: root.dim
@@ -1483,6 +1493,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "PANEL CARDS"
             color: root.dim
@@ -1561,6 +1572,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: root.customCommand === ""
             text: "Set customCommand in the widget's settings to add your own card."
@@ -1571,6 +1583,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "↑↓ row · ←→ reorder · space show/hide · Esc done"
             color: root.dim
@@ -1579,6 +1592,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: root.service && String(root.service.prefsError || "") !== ""
             text: "Couldn't save: " + (root.service ? String(root.service.prefsError || "") : "")
@@ -1597,6 +1611,7 @@ Panel {
           implicitHeight: Math.max(footerText.implicitHeight, refreshButton.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: footerText
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
