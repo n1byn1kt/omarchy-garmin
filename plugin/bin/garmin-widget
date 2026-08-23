@@ -52,7 +52,13 @@ def _maybe_reexec_into_venv(argv) -> None:
     if not venv_py.exists():
         return
     os.environ["GARMIN_WIDGET_REEXEC"] = "1"
-    os.execv(str(venv_py), [str(venv_py), os.path.abspath(__file__), *argv])
+    try:
+        os.execv(str(venv_py), [str(venv_py), os.path.abspath(__file__), *argv])
+    except OSError:
+        # Broken venv (bad perms/shebang, partial install, ENOENT race):
+        # fall through to normal dispatch, which will report the deps
+        # payload rather than crash before printing any JSON at all.
+        pass
 
 def main(argv) -> int:
     _maybe_reexec_into_venv(argv)

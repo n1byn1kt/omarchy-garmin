@@ -166,6 +166,30 @@ def test_reexec_into_venv_when_garminconnect_missing(home, monkeypatch, capsys):
         os.environ.pop("GARMIN_WIDGET_REEXEC", None)
 
 
+def test_reexec_execv_failure_falls_through_to_deps_payload(home, monkeypatch, capsys):
+    """A venv python that exists but can't actually be exec'd (bad perms,
+    broken shebang, ENOENT race, partial venv) must not crash the helper —
+    fall through to the normal deps payload instead."""
+    mod = load_helper()
+    monkeypatch.setattr(mod, "HAS_GARMINCONNECT", False)
+    monkeypatch.delenv("GARMIN_WIDGET_REEXEC", raising=False)
+    venv_py = mod._venv_python()
+    venv_py.parent.mkdir(parents=True, exist_ok=True)
+    venv_py.write_text("#!/bin/sh\n")
+
+    def fake_execv(path, args):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "execv", fake_execv)
+    try:
+        rc, out = run(mod, ["fetch"], capsys)
+        assert rc == 0
+        assert out["ok"] is False and out["error"] == "deps"
+        assert out["hint"] == mod.DEPS_HINT
+    finally:
+        os.environ.pop("GARMIN_WIDGET_REEXEC", None)
+
+
 def test_reexec_not_attempted_when_garminconnect_present(home, fake_garmin, monkeypatch, capsys):
     """Existing fake_garmin-backed tests must stay green: importable
     garminconnect means no re-exec is attempted at all."""
