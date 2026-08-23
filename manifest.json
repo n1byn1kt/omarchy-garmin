@@ -4,7 +4,7 @@
   "name": "Garmin",
   "version": "0.2.0",
   "author": "n1byn1kt",
-  "description": "Today's Garmin health at a glance: Body Battery in the bar; sleep score, steps, and resting heart rate in a click panel.",
+  "description": "Your Garmin day in the bar: a configurable metric chip (Body Battery, steps, sleep, or readiness) and a panel of customizable cards — day curve, sleep, steps, readiness, HRV, and more.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
