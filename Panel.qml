@@ -1144,8 +1144,9 @@ Panel {
           }
           iconComponent: Component {
             Text {
-              // nf-md-lightning-bolt, the same glyph the bar chip uses.
-              text: "󱐋"
+              // nf-md-triangle (U+F0536): evokes Garmin's delta mark without
+              // reproducing the trademarked logo. Metric glyphs stay per-metric.
+              text: "󰔶"
               color: root.showRows && !root.showStale ? root.accentColor : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
