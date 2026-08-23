@@ -120,9 +120,10 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 | `showSteps` | boolean | `false` | Also show today's steps next to Body Battery in the bar (e.g. `⚡61  8.0k`). |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
 
-On a multi-monitor setup the widget appears on every bar, but only **one**
-instance polls and it fans the result out to the others — one bar or four, it is
-still one Garmin session.
+On a multi-monitor setup the widget appears on every bar, and it is designed so
+that only **one** instance polls, fanning the result out to the others — one
+Garmin session regardless of bar count. (Developed and verified on a
+single-monitor setup; multi-monitor reports welcome.)
 
 ---
 
