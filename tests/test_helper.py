@@ -1,4 +1,5 @@
 import json
+import os
 
 from conftest import load_helper
 
@@ -109,3 +110,71 @@ def test_fetch_cache_write_failure_is_nonfatal(home, fake_garmin, capsys):
     rc, out = run(mod, ["fetch"], capsys)
     assert rc == 0
     assert out["ok"] is True and out["stale"] is False
+
+
+def test_deps_hint_is_venv_install_for_fetch_and_login(home, monkeypatch, capsys):
+    mod = load_helper()
+    monkeypatch.setattr(mod, "HAS_GARMINCONNECT", False)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["error"] == "deps"
+    assert out["hint"] == mod.DEPS_HINT
+    assert out["hint"] == (
+        "python3 -m venv ~/.local/share/garmin-widget/venv && "
+        "~/.local/share/garmin-widget/venv/bin/pip install garminconnect"
+    )
+    rc, out = run(mod, ["login"], capsys)
+    assert out["error"] == "deps"
+    assert out["hint"] == mod.DEPS_HINT
+
+
+def test_reexec_loop_guard_skips_execv(home, monkeypatch, capsys):
+    """GARMIN_WIDGET_REEXEC already set means we already re-exec'd once;
+    don't try again even if garminconnect is still missing."""
+    mod = load_helper()
+    monkeypatch.setattr(mod, "HAS_GARMINCONNECT", False)
+    monkeypatch.setenv("GARMIN_WIDGET_REEXEC", "1")
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda *a: calls.append(a))
+    # Even with a venv python present, the loop guard must win.
+    venv_py = mod._venv_python()
+    venv_py.parent.mkdir(parents=True, exist_ok=True)
+    venv_py.write_text("#!/bin/sh\n")
+    rc, out = run(mod, ["fetch"], capsys)
+    assert calls == []
+    assert out["ok"] is False and out["error"] == "deps"
+
+
+def test_reexec_into_venv_when_garminconnect_missing(home, monkeypatch, capsys):
+    mod = load_helper()
+    monkeypatch.setattr(mod, "HAS_GARMINCONNECT", False)
+    monkeypatch.delenv("GARMIN_WIDGET_REEXEC", raising=False)
+    venv_py = mod._venv_python()
+    venv_py.parent.mkdir(parents=True, exist_ok=True)
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o755)
+
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda path, args: calls.append((path, args)))
+    try:
+        mod.main(["fetch"])
+        assert len(calls) == 1
+        path, args = calls[0]
+        assert path == str(venv_py)
+        assert args == [str(venv_py), os.path.abspath(mod.__file__), "fetch"]
+        assert os.environ.get("GARMIN_WIDGET_REEXEC") == "1"
+    finally:
+        os.environ.pop("GARMIN_WIDGET_REEXEC", None)
+
+
+def test_reexec_not_attempted_when_garminconnect_present(home, fake_garmin, monkeypatch, capsys):
+    """Existing fake_garmin-backed tests must stay green: importable
+    garminconnect means no re-exec is attempted at all."""
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    mod = load_helper()
+    assert mod.HAS_GARMINCONNECT is True
+    _with_tokens(mod)
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda *a: calls.append(a))
+    rc, out = run(mod, ["fetch"], capsys)
+    assert calls == []
+    assert out["ok"] is True
