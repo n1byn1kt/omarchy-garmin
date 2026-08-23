@@ -29,6 +29,8 @@ the day's Body Battery and stress curve, sleep score and duration, steps against
 your Garmin step goal, training readiness, resting HR, and more (full list under
 [Settings](#settings)). Cards carry a seven-day strip and a `↗ ↘ →` delta where
 the cache has the history for it, plus a footer timestamp and a Refresh button.
+The pencil in the header rearranges the whole deck without leaving the panel —
+see [Rearranging the cards](#rearranging-the-cards-from-the-panel).
 
 Deltas and strips compare the **two newest days in the local cache**, which is
 normally today against yesterday. They are drawn from cached history, not from
@@ -41,12 +43,101 @@ older one; the footer's `· stale` is what tells you so.
 |---|---|
 | Left click the chip | Open / close the panel |
 | Middle click the chip | Force a refresh |
-| `Escape` (panel focused) | Close the panel |
+| Pencil icon (panel header) | Enter / leave edit mode |
+| `Escape` (panel focused) | Leave edit mode, or close the panel |
+| `e` (panel focused) | Enter / leave edit mode |
 | `r` (panel focused) | Refresh |
 | `c` (panel focused) | Copy the suggested command to the clipboard |
 | `qs ipc call garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
 
 ---
+
+## Rearranging the cards from the panel
+
+The pencil in the panel header opens **edit mode**, and everything about which
+cards you see lives there — no config file, no shell restart:
+
+- the **bar chip metric** as four chips at the top (Body Battery, Steps, Sleep,
+  Readiness), the current one highlighted;
+- every card below it with an **eye toggle** to show or hide it and **↑ ↓**
+  arrows to move it. Hidden cards sink to the bottom of the list.
+
+Changes apply the moment you make them — the panel behind re-renders and the
+chip in the bar changes with it. `Escape`, the `Done` button, or the check icon
+in the header leaves edit mode. From the keyboard: `↑ ↓` walks the rows, `← →`
+reorders the row you are on (or picks the chip metric on the top row), and
+`space` shows or hides. The last visible card cannot be turned off.
+
+Edits are written by the helper to `~/.config/garmin-widget/prefs.json`
+(`0600`, atomically replaced — QML never writes files itself), and they
+**override** the `barMetric` and `panelMetrics` settings:
+
+```
+prefs.json  >  shell.json setting  >  built-in default
+```
+
+So the settings below are the starting point, and edit mode is the last word.
+Delete `prefs.json` and the widget goes straight back to your `shell.json`.
+
+---
+
+## Your own card
+
+`customCommand` puts anything you can print on the panel. The command runs on
+the same cadence as the Garmin poll (and on every manual refresh), and must
+print **one JSON object**:
+
+```json
+{"title": "Disk", "value": "888G free", "caption": "7% used",
+ "meter": {"value": 7, "max": 100}, "tone": ""}
+```
+
+`title` and `value` are required; `caption`, `meter` and `tone` are optional.
+`tone` is `accent`, `urgent` or empty — the same colours the health cards use.
+A `meter` with a positive `max` draws the progress bar.
+
+A worked example — free space on `/`, saved as `~/garmin-card-disk.sh` and
+`chmod +x`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+read -r pct avail < <(df --output=pcent,avail -h / | tail -1)
+pct=${pct%\%}; pct=${pct// /}
+tone=""
+[ "$pct" -ge 90 ] && tone="urgent"
+printf '{"title":"Disk","value":"%s free","caption":"%s%% used","meter":{"value":%s,"max":100},"tone":"%s"}\n' \
+  "$avail" "$pct" "$pct" "$tone"
+```
+
+Then set `customCommand` to `~/garmin-card-disk.sh` and turn the **Custom
+command** row on in edit mode (it only appears once a command is set).
+
+The card is deliberately unable to hurt the rest of the widget. It runs in its
+own process with a **10-second timeout**, output over **8 KB** is ignored, and
+anything that is not a well-formed object with a title and a value — garbage, a
+non-zero exit, a hang, valid JSON of the wrong shape — simply **hides the card**
+and puts the reason in the chip's tooltip, prefixed `custom card:`. The Garmin
+fetch, the chip's number and every other card carry on untouched.
+
+Two things it is not: it is not a shell you should put secrets in (the command
+line sits in `shell.json` in plain text), and it is not a scheduler — a command
+that takes seconds delays nothing, but it also does not get to run more often
+than the poll interval.
+
+---
+
+## What's new in 0.3.0
+
+- **Edit mode.** The pencil in the panel header turns the card list into a
+  reorderable, toggleable list, with the bar chip's metric as a row of chips at
+  the top. Changes apply live and persist in `prefs.json`, which overrides the
+  matching settings.
+- **A card of your own.** `customCommand` runs anything that prints a small JSON
+  object and shows it as a card — sandboxed behind a timeout, an output cap and
+  a defensive parser, so a broken script costs you that card and nothing else.
+- **`prefs` subcommand.** `garmin-widget prefs get|set KEY VALUE` is the only
+  writer of `prefs.json`; the panel calls it rather than touching disk itself.
 
 ## What's new in 0.2.0
 
@@ -156,10 +247,11 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 | Setting | Type | Default | What it does |
 |---|---|---|---|
 | `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes** — anything lower (including `0`, which a typo makes easy) is clamped, since Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
-| `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. |
+| `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. `⚡61  8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
-| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the seven-day strips are dropped to keep the panel a sane height. |
+| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the seven-day strips are dropped to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
+| `customCommand` | string | `""` (off) | A command line whose stdout is one JSON object `{title, value, caption, meter:{value,max}, tone}`, rendered as the `custom` card. Empty means the card does not exist and nothing is ever run. See [Your own card](#your-own-card) for the contract and the safety rails. |
 
 On a multi-monitor setup the widget appears on every bar, and it is designed so
 that only **one** instance polls, fanning the result out to the others — one
@@ -179,6 +271,7 @@ Everything this plugin writes lives under your home directory:
 | Path | Contents |
 |---|---|
 | `~/.config/garmin-widget/tokens.json` | Garmin OAuth tokens, mode `0600`. No password. |
+| `~/.config/garmin-widget/prefs.json` | What you chose in the panel's edit mode — the card list and the bar metric, mode `0600`. Delete it to fall back to your `shell.json` settings. |
 | `~/.cache/garmin-widget/last.json` | Last successful reading, so the bar can show yesterday's numbers while offline. |
 | `~/.cache/garmin-widget/history.json` | Up to seven daily snapshots (sleep score, steps, Body Battery high, resting HR) — the source of the panel's strips and deltas. The first successful fetch backfills the past six days once, so the strips are full from the start; the `backfilled` flag in the file is what stops it running again. |
 | `~/.local/share/garmin-widget/venv/` | The dedicated virtualenv holding `garminconnect`. |
