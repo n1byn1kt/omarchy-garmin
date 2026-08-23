@@ -6,7 +6,7 @@ import types
 import pathlib
 import pytest
 
-HELPER = pathlib.Path(__file__).resolve().parent.parent / "plugin" / "bin" / "garmin-widget"
+HELPER = pathlib.Path(__file__).resolve().parent.parent / "bin" / "garmin-widget"
 
 
 def load_helper():
