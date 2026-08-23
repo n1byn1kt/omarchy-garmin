@@ -303,13 +303,15 @@ Item {
     // is over and reject the output, and nothing bigger is ever buffered. The
     // QML-side check stays — it is what turns the excess into a message.
     //
-    // `pipefail` is what keeps a failing command still reading as a failure:
-    // without it the pipeline's status is `head`'s, which is always 0, and an
-    // exit-3 script would be reported as "printed nothing". The cost is that a
-    // command killed by head's closed pipe surfaces as 141, which onExited
-    // translates back into the over-cap message.
+    // Deliberately no `set -o pipefail`: it would apply inside the brace group
+    // as well, and a perfectly good command line with an early-terminating pipe
+    // of its own (`foo | head -5`, `x | grep -m1`) exits 141 on a benign
+    // SIGPIPE. The tradeoff is that the command's own non-zero exit is masked
+    // by head's 0 — acceptable, because what decides whether a card renders is
+    // the *content*: over-cap is measured on the bytes collected, and anything
+    // that is not a well-formed card fails the parse regardless of exit status.
     customProcess.command = ["bash", "-c",
-      "set -o pipefail; { " + String(root.customCommand) + " ; } | head -c 8193"]
+      "{ " + String(root.customCommand) + " ; } | head -c 8193"]
     customProcess.running = true
     customWatchdog.restart()
   }
@@ -348,34 +350,43 @@ Item {
     return s.length > limit ? s.substring(0, limit) : s
   }
 
-  function applyCustom(text) {
+  // The exit code is advisory only — see runCustom() for why it cannot be
+  // trusted as a verdict. It is appended to whatever the content check has to
+  // say, so a script that both failed and printed nothing still names the code.
+  function customFailWithCode(detail, exitCode) {
+    root.customFail(Number(exitCode) ? detail + " (exited " + exitCode + ")" : detail)
+  }
+
+  function applyCustom(text, exitCode) {
     var raw = String(text || "")
+    // `head -c 8193` guarantees this is the over-cap signal and the only one:
+    // 8193 bytes collected means the command had at least one more to give.
     if (raw.length > root.customOutputCap) {
       root.customFail("command printed more than 8 KB")
       return
     }
     if (raw.replace(/^\s+|\s+$/g, "") === "") {
-      root.customFail("command printed nothing")
+      root.customFailWithCode("command printed nothing", exitCode)
       return
     }
     var obj
     try {
       obj = JSON.parse(raw)
     } catch (e) {
-      root.customFail("command output was not JSON")
+      root.customFailWithCode("command output was not JSON", exitCode)
       return
     }
     // Arrays are objects in JS, and an array's `.title` is undefined, so this
     // would otherwise fall through to the missing-fields branch with a
     // misleading message.
     if (!obj || typeof obj !== "object" || obj.length !== undefined) {
-      root.customFail("command output was not a JSON object")
+      root.customFailWithCode("command output was not a JSON object", exitCode)
       return
     }
     var title = root.customText(obj.title, 40)
     var value = root.customText(obj.value, 24)
     if (title === "" || value === "") {
-      root.customFail("output needs both title and value")
+      root.customFailWithCode("output needs both title and value", exitCode)
       return
     }
     var tone = root.customText(obj.tone, 8)
@@ -413,15 +424,10 @@ Item {
       customWatchdog.stop()
       customWatchdog.tripped = false
       if (timedOut) return
-      if (exitCode !== 0) {
-        // 141 = SIGPIPE, which on this pipeline means `head` hit the cap and
-        // closed on the command rather than the command itself failing.
-        root.customFail(exitCode === 141
-          ? "command printed more than 8 KB"
-          : "command exited " + exitCode)
-        return
-      }
-      root.applyCustom(String(customStdout.text || root._customOut || ""))
+      // No exit-code gate: what the command printed is the verdict, and the
+      // status of a pipeline ending in `head` is not the command's own. The
+      // code is passed along only so a failure message can mention it.
+      root.applyCustom(String(customStdout.text || root._customOut || ""), exitCode)
     }
   }
 

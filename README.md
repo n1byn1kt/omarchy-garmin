@@ -117,9 +117,13 @@ that row off stops the command from running at all, not just from being drawn.
 The card is deliberately unable to hurt the rest of the widget. It runs in its
 own process with a **10-second timeout**, output over **8 KB** is ignored, and
 anything that is not a well-formed object with a title and a value — garbage, a
-non-zero exit, a hang, valid JSON of the wrong shape — simply **hides the card**
-and puts the reason in the chip's tooltip, prefixed `custom card:`. The Garmin
-fetch, the chip's number and every other card carry on untouched. One caveat on
+hang, valid JSON of the wrong shape — simply **hides the card** and puts the
+reason in the chip's tooltip, prefixed `custom card:`. What decides that is the
+output, not the exit status: your command's own pipelines are none of the
+widget's business, so a command that prints a good card is drawn whatever it
+exits with, and a non-zero exit is only ever mentioned as extra detail on a
+message the output had already earned. The Garmin fetch, the chip's number and
+every other card carry on untouched. One caveat on
 the timeout: it kills the `bash -c` your command line runs in, and — that being
 how `bash -c` works — anything your command backgrounded or spawned into another
 process group is left running, so write commands that finish on their own.
