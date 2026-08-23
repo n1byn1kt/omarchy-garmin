@@ -18,6 +18,10 @@ def _home() -> Path:
 # Recomputed at import so tests can swap $HOME per-test via load_helper().
 TOKENS_PATH = _home() / ".config" / "garmin-widget" / "tokens.json"
 CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
+HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
+
+HISTORY_DAYS = 7
+CURVE_POINTS = 96   # the panel's Canvas is ~300px wide; more is wasted JSON
 
 try:
     import garminconnect  # noqa: F401
@@ -90,10 +94,172 @@ def _get(d, *keys):
         d = d.get(k) if isinstance(d, dict) else None
     return d
 
-def build_payload(summary, sleep, as_of):
+def _num(v):
+    """A real number, or None. Booleans are not numbers here."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v
+
+
+def _round(v):
+    n = _num(v)
+    return None if n is None else round(n)
+
+
+def _desc_index(descriptors, want):
+    """Column index of `want` in one of Garmin's descriptor lists.
+
+    Garmin ships its day series as bare arrays plus a descriptor list naming
+    the columns, and the descriptor key/index field names differ per endpoint
+    ('key'/'index' for stress, 'bodyBatteryValueDescriptorKey'/...Index for
+    body battery). Reading the descriptors rather than hardcoding column 1
+    is what keeps this working when a column is added.
+    """
+    for i, d in enumerate(descriptors or []):
+        if not isinstance(d, dict):
+            continue
+        key = d.get("key", d.get("bodyBatteryValueDescriptorKey"))
+        if key == want:
+            idx = d.get("index", d.get("bodyBatteryValueDescriptorIndex", i))
+            return idx if isinstance(idx, int) else i
+    return None
+
+
+def _downsample(points, limit=CURVE_POINTS):
+    """Evenly thin a series to `limit` points, always keeping the last one."""
+    n = len(points)
+    if n <= limit:
+        return points
+    step = n / limit
+    out = [points[int(i * step)] for i in range(limit)]
+    out[-1] = points[-1]
+    return out
+
+
+def _series(rows, descriptors, value_key):
+    """[[epochMs, value], ...] from a Garmin day array, or None.
+
+    Rows whose value is missing or negative are dropped: stress uses -1/-2 as
+    "no valid reading", and a chart that plots those gets a spike to the floor
+    every time the watch was off the wrist.
+    """
+    if not isinstance(rows, list) or not rows:
+        return None
+    ti = _desc_index(descriptors, "timestamp")
+    vi = _desc_index(descriptors, value_key)
+    if ti is None or vi is None:
+        return None
+    out = []
+    for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) <= max(ti, vi):
+            continue
+        ts, val = _num(r[ti]), _num(r[vi])
+        if ts is None or val is None or val < 0:
+            continue
+        out.append([int(ts), round(val)])
+    return _downsample(out) if out else None
+
+
+def build_curve(body_battery, stress):
+    """{"bodyBattery": [...], "stress": [...]} — or None if neither exists.
+
+    The dense minute-level body battery series lives inside get_stress_data
+    (401 points on a full day); get_body_battery's own array turned out to be
+    a handful of inflection markers (6 points on the same day). Whichever
+    source yields more points wins, so the curve is right either way.
+    """
+    day = body_battery[0] if isinstance(body_battery, list) and body_battery else None
+    day = day if isinstance(day, dict) else {}
+    stress = stress if isinstance(stress, dict) else {}
+
+    bb_own = _series(day.get("bodyBatteryValuesArray"),
+                     day.get("bodyBatteryValueDescriptorDTOList"),
+                     "bodyBatteryLevel")
+    bb_dense = _series(stress.get("bodyBatteryValuesArray"),
+                       stress.get("bodyBatteryValueDescriptorsDTOList"),
+                       "bodyBatteryLevel")
+    bb = max((s for s in (bb_own, bb_dense) if s), key=len, default=None)
+    st = _series(stress.get("stressValuesArray"),
+                 stress.get("stressValueDescriptorsDTOList"), "stressLevel")
+    if bb is None and st is None:
+        return None
+    return {"bodyBattery": bb, "stress": st}
+
+
+def build_hrv(hrv):
+    s = _get(hrv, "hrvSummary")
+    if not isinstance(s, dict):
+        return None
+    status = s.get("status")
+    out = {"lastNightAvg": _round(s.get("lastNightAvg")),
+           "weeklyAvg": _round(s.get("weeklyAvg")),
+           "status": status if isinstance(status, str) else None}
+    return out if any(v is not None for v in out.values()) else None
+
+
+def build_readiness(readiness):
+    # get_training_readiness returns a list; the current reading is first.
+    r = readiness[0] if isinstance(readiness, list) and readiness else readiness
+    if not isinstance(r, dict):
+        return None
+    score, level = _round(r.get("score")), r.get("level")
+    if score is None and not isinstance(level, str):
+        return None
+    return {"score": score, "level": level if isinstance(level, str) else None}
+
+
+def build_intensity(intensity):
+    if not isinstance(intensity, dict):
+        return None
+    weekly, goal = _round(intensity.get("weeklyTotal")), _round(intensity.get("weekGoal"))
+    if weekly is None and goal is None:
+        return None
+    return {"weekly": weekly, "goal": goal}
+
+
+def build_last_activity(act):
+    """{type, durationMin, distanceKm, date} — and nothing else.
+
+    The raw activity dict carries start coordinates, activity and device ids,
+    the owner's real name and profile image URLs. None of that belongs in a
+    file the panel reads, so this whitelists four fields rather than trimming.
+    The date is kept because the last activity is often weeks old and a card
+    that doesn't say so is just misleading.
+    """
+    if not isinstance(act, dict):
+        return None
+    dur, dist = _num(act.get("duration")), _num(act.get("distance"))
+    type_key = _get(act, "activityType", "typeKey")
+    start = act.get("startTimeLocal")
+    return {
+        "type": type_key if isinstance(type_key, str) else None,
+        "durationMin": round(dur / 60) if dur else None,
+        "distanceKm": round(dist / 1000, 2) if dist else None,
+        "date": start.split(" ")[0].split("T")[0] if isinstance(start, str) else None,
+    }
+
+
+def build_floors(summary):
+    count, goal = _round(summary.get("floorsAscended")), _round(
+        summary.get("userFloorsAscendedGoal"))
+    if count is None and goal is None:
+        return None
+    return {"count": count, "goal": goal}
+
+
+def build_calories(summary):
+    total, active = _round(summary.get("totalKilocalories")), _round(
+        summary.get("activeKilocalories"))
+    if total is None and active is None:
+        return None
+    return {"total": total, "active": active}
+
+
+def build_payload(summary, sleep, as_of, extras=None):
     dto = _get(sleep, "dailySleepDTO") or {}
     secs = dto.get("sleepTimeSeconds")
-    return {
+    extras = extras or {}
+    payload = {
         "ok": True, "stale": False, "asOf": as_of,
         "bodyBattery": {
             "current": summary.get("bodyBatteryMostRecentValue"),
@@ -107,6 +273,41 @@ def build_payload(summary, sleep, as_of):
         "steps": {"count": summary.get("totalSteps"),
                   "goal": summary.get("dailyStepGoal")},
         "restingHr": summary.get("restingHeartRate"),
+    }
+    # Every extended key is always present — null when the endpoint was
+    # unavailable — so the QML side can branch on null instead of undefined.
+    payload["curve"] = build_curve(extras.get("bodyBattery"), extras.get("stress"))
+    payload["hrvStatus"] = build_hrv(extras.get("hrv"))
+    payload["readiness"] = build_readiness(extras.get("readiness"))
+    payload["intensityMinutes"] = build_intensity(extras.get("intensity"))
+    payload["floors"] = build_floors(summary)
+    payload["calories"] = build_calories(summary)
+    payload["lastActivity"] = build_last_activity(extras.get("lastActivity"))
+    return payload
+
+
+def _safe(fn):
+    """Run one secondary API call; a failure nulls its key, nothing more.
+
+    The extended metrics come from six separate endpoints, any of which can
+    404 for a day with no data, or 500, or vanish in the next garminconnect
+    release. One of them failing must never cost the user their body battery
+    chip, so each is isolated here rather than sharing fetch's try block.
+    """
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _fetch_extras(g, today):
+    return {
+        "bodyBattery": _safe(lambda: g.get_body_battery(today)),
+        "stress": _safe(lambda: g.get_stress_data(today)),
+        "hrv": _safe(lambda: g.get_hrv_data(today)),
+        "readiness": _safe(lambda: g.get_training_readiness(today)),
+        "intensity": _safe(lambda: g.get_intensity_minutes_data(today)),
+        "lastActivity": _safe(lambda: g.get_last_activity()),
     }
 
 def _secure_tokens() -> None:
@@ -169,8 +370,9 @@ def cmd_fetch() -> int:
     try:
         g = gc.Garmin()
         g.login(tokenstore=str(TOKENS_PATH))
-        payload = build_payload(g.get_user_summary(today) or {},
-                                g.get_sleep_data(today) or {}, now)
+        summary = g.get_user_summary(today) or {}
+        sleep = g.get_sleep_data(today) or {}
+        payload = build_payload(summary, sleep, now, _fetch_extras(g, today))
     except gc.GarminConnectAuthenticationError:
         return emit({"ok": False, "error": "auth-expired",
                      "hint": "run: garmin-widget login"})
@@ -189,13 +391,14 @@ def cmd_fetch() -> int:
         # ambient umask, whether or not the rest of the call succeeded.
         if TOKENS_PATH.exists():
             _secure_tokens()
+    payload["history"] = _update_history(payload, today)
     _write_cache(payload)
     return emit(payload)
 
-def _write_cache(payload) -> None:
-    """Replace the cache atomically, or not at all.
+def _atomic_write(path: Path, obj, prefix: str) -> None:
+    """Replace `path` with json(obj) atomically, at 0600, or not at all.
 
-    A torn write is worse than a missing cache: the next offline fetch would
+    A torn write is worse than a missing file: the next offline fetch would
     read half a JSON object, fall through to the generic error branch, and the
     bar would blank instead of showing yesterday's numbers. Writing a sibling
     temp file and os.replace()ing it means readers only ever see a whole file.
@@ -203,25 +406,67 @@ def _write_cache(payload) -> None:
     """
     tmp = None
     try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(CACHE_PATH.parent),
-                                   prefix=".last-", suffix=".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                   prefix=prefix, suffix=".json")
         with os.fdopen(fd, "w") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp, CACHE_PATH)  # same directory, so this is atomic
+            json.dump(obj, fh)
+        os.replace(tmp, path)  # same directory, so this is atomic
         tmp = None
-        # mkstemp already made it 0600 and os.replace preserves that, but the
-        # cache holds a day of health data, so the mode is asserted rather
-        # than assumed.
-        os.chmod(CACHE_PATH, 0o600)
+        # mkstemp already made it 0600 and os.replace preserves that, but
+        # these files hold days of health data, so the mode is asserted
+        # rather than assumed.
+        os.chmod(path, 0o600)
     except Exception:
-        pass  # cache write is best-effort; must never break fetch
+        pass  # best-effort; must never break fetch
     finally:
         if tmp is not None:
             try:
                 os.unlink(tmp)
             except Exception:
                 pass
+
+def _write_cache(payload) -> None:
+    _atomic_write(CACHE_PATH, payload, ".last-")
+
+def _load_history():
+    """Whatever of history.json is usable, as a list. Never raises.
+
+    A truncated or hand-edited file must not cost the user their fetch, so
+    anything unreadable is treated as "no history yet" and gets overwritten
+    on the next successful poll.
+    """
+    try:
+        data = json.loads(HISTORY_PATH.read_text())
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data
+            if isinstance(e, dict) and isinstance(e.get("date"), str)]
+
+def _update_history(payload, today):
+    """Record today's snapshot and return the trailing week of them.
+
+    Deltas and sparklines are computed QML-side from this list, which is why
+    it ships inside the payload rather than being read separately.
+    """
+    try:
+        entry = {
+            "date": today,
+            "sleepScore": _get(payload, "sleep", "score"),
+            "steps": _get(payload, "steps", "count"),
+            "bodyBatteryHigh": _get(payload, "bodyBattery", "high"),
+            "restingHr": payload.get("restingHr"),
+        }
+        history = [e for e in _load_history() if e.get("date") != today]
+        history.append(entry)
+        history.sort(key=lambda e: e["date"])
+        history = history[-HISTORY_DAYS:]
+        _atomic_write(HISTORY_PATH, history, ".history-")
+        return history
+    except Exception:
+        return []
 
 def cmd_login() -> int:
     if not HAS_GARMINCONNECT:
