@@ -2,26 +2,30 @@
   "schemaVersion": 1,
   "id": "io.github.n1byn1kt.garmin",
   "name": "Garmin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "n1byn1kt",
   "description": "Today's Garmin health at a glance: Body Battery in the bar; sleep score, steps, and resting heart rate in a click panel.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
     "displayName": "Garmin",
-    "description": "Body Battery chip — click for sleep, steps, and resting HR",
+    "description": "Health chip — Body Battery, steps, sleep or readiness; click for the full panel",
     "category": "Health",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "pollMinutes": 30,
+      "barMetric": "bodyBattery",
       "showSteps": false,
-      "stepsGoalFallback": 10000
+      "stepsGoalFallback": 10000,
+      "panelMetrics": "curve,sleep,steps,readiness,rhr"
     },
     "schema": [
       { "key": "pollMinutes", "type": "number", "label": "Refresh interval (minutes)" },
-      { "key": "showSteps", "type": "boolean", "label": "Show steps next to Body Battery" },
-      { "key": "stepsGoalFallback", "type": "number", "label": "Step goal if Garmin doesn't provide one" }
+      { "key": "barMetric", "type": "string", "label": "Bar metric: bodyBattery, steps, sleep or readiness (default bodyBattery)" },
+      { "key": "showSteps", "type": "boolean", "label": "Show steps next to the bar metric (ignored when the bar metric is steps)" },
+      { "key": "stepsGoalFallback", "type": "number", "label": "Step goal if Garmin doesn't provide one" },
+      { "key": "panelMetrics", "type": "string", "label": "Panel cards, comma-separated and in order: curve, battery, sleep, steps, readiness, rhr, hrv, intensity, floors, calories, activity" }
     ]
   }
 }

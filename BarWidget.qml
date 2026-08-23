@@ -4,24 +4,68 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Garmin Body Battery chip for the bar.
+// Garmin health chip for the bar.
 //
 // The chip is the whole widget for people who never click it, so it has to say
 // something honest in every state the helper can be in: a number when we have
 // one we still stand behind, an em dash when we do not, a trailing dot when
 // the number is older than it should be. Left click opens the detail panel,
 // middle click forces a refresh.
+//
+// Which number it carries is a setting; the honesty rules above are not.
 BarWidget {
   id: root
   moduleName: "io.github.n1byn1kt.garmin"
 
-  readonly property bool showSteps: setting("showSteps", false) === true
+  // ---- Which metric the chip carries
+  //
+  // Case-insensitive and typo-tolerant: anything that is not one of the four
+  // known metrics falls back to Body Battery rather than blanking the chip,
+  // for the same reason an unknown panel token drops a card instead of the
+  // panel.
+  readonly property var knownBarMetrics: ["bodyBattery", "steps", "sleep", "readiness"]
+  readonly property string barMetric: {
+    var raw = String(root.setting("barMetric", "bodyBattery")).replace(/^\s+|\s+$/g, "").toLowerCase()
+    for (var i = 0; i < root.knownBarMetrics.length; i++)
+      if (root.knownBarMetrics[i].toLowerCase() === raw) return root.knownBarMetrics[i]
+    return "bodyBattery"
+  }
 
-  // Monochrome nerd-font bolt (nf-md-lightning-bolt, U+F140B) rather than the
-  // U+26A1 emoji: fontconfig hands emoji to a colour font, which ignores the
-  // theme entirely and paints an orange blob next to the monochrome glyphs
-  // every other bar widget uses.
+  // Steps as the headline figure and steps as the trailing figure is the same
+  // number twice, so the setting quietly loses to the metric choice.
+  readonly property bool showSteps:
+    setting("showSteps", false) === true && root.barMetric !== "steps"
+
+  // Monochrome nerd-font glyphs (nf-md-*) rather than emoji: fontconfig hands
+  // emoji to a colour font, which ignores the theme entirely and paints an
+  // orange blob next to the monochrome glyphs every other bar widget uses.
+  // Each codepoint was checked against the cmap of the box's actual bar font,
+  // and each matches the icon the panel's card for the same metric uses.
   readonly property string boltGlyph: "󱐋"
+  readonly property string metricGlyph: {
+    switch (root.barMetric) {
+    case "steps": return "󰖃"      // nf-md-walk, U+F0583
+    case "sleep": return "󰒲"      // nf-md-sleep, U+F04B2
+    case "readiness": return "󰓅"  // nf-md-speedometer, U+F04C5
+    default: return root.boltGlyph // nf-md-lightning-bolt, U+F140B
+    }
+  }
+
+  // Nerd-font md glyphs are drawn at ~1.4 cells wide but advance one cell, so
+  // the wide ones paint straight over the first digit. Measured against the
+  // box's bar font (hmtx advance 600 vs glyf xMax): bolt 550 and walk 571 fit,
+  // sleep 918 and speedometer 832 do not — those two get a space to sit in.
+  readonly property string metricGap:
+    (root.barMetric === "sleep" || root.barMetric === "readiness") ? " " : ""
+
+  readonly property string metricLabel: {
+    switch (root.barMetric) {
+    case "steps": return "Steps"
+    case "sleep": return "Sleep score"
+    case "readiness": return "Training readiness"
+    default: return "Body Battery"
+    }
+  }
 
   Service {
     id: service
@@ -91,19 +135,54 @@ BarWidget {
   // Garmin via a JSON file on disk, and a string where a number belongs would
   // be rendered verbatim — widening the chip and shoving every widget to its
   // left along the bar. Anything that will not coerce reads as no data at all.
-  readonly property var bb: {
-    var raw = service.payload && service.payload.bodyBattery ? service.payload.bodyBattery.current : null
-    if (raw === null || raw === undefined || raw === "") return null
-    var n = Number(raw)
-    return isFinite(n) ? Math.round(n) : null
-  }
-  readonly property bool hasBattery: bb !== null
-
-  readonly property var stepCount: {
-    var raw = service.payload && service.payload.steps ? service.payload.steps.count : null
+  function num(raw) {
     if (raw === null || raw === undefined || raw === "") return null
     var n = Number(raw)
     return isFinite(n) ? n : null
+  }
+
+  readonly property var bb: {
+    var n = root.num(service.payload && service.payload.bodyBattery ? service.payload.bodyBattery.current : null)
+    return n === null ? null : Math.round(n)
+  }
+
+  readonly property var stepCount:
+    root.num(service.payload && service.payload.steps ? service.payload.steps.count : null)
+
+  readonly property var stepGoal: {
+    var g = root.num(service.payload && service.payload.steps ? service.payload.steps.goal : null)
+    if (g !== null && g > 0) return g
+    var fallback = root.num(root.setting("stepsGoalFallback", 10000))
+    return fallback !== null && fallback > 0 ? fallback : 10000
+  }
+
+  readonly property var sleepScore: {
+    var n = root.num(service.payload && service.payload.sleep ? service.payload.sleep.score : null)
+    return n === null ? null : Math.round(n)
+  }
+
+  readonly property var readinessScore: {
+    var n = root.num(service.payload && service.payload.readiness ? service.payload.readiness.score : null)
+    return n === null ? null : Math.round(n)
+  }
+
+  // The chosen metric's number, and how it reads on a bar where every pixel is
+  // contested: steps go to `8.0k` the way the secondary figure always has,
+  // everything else is a bare score.
+  readonly property var metricValue: {
+    switch (root.barMetric) {
+    case "steps": return root.stepCount
+    case "sleep": return root.sleepScore
+    case "readiness": return root.readinessScore
+    default: return root.bb
+    }
+  }
+  readonly property bool hasValue: root.metricValue !== null
+
+  readonly property string metricText: {
+    if (!root.hasValue) return "—"
+    if (root.barMetric === "steps") return (root.metricValue / 1000).toFixed(1) + "k"
+    return String(root.metricValue)
   }
 
   // Two kinds of broken, and they must not look alike. A missing dependency or
@@ -117,14 +196,14 @@ BarWidget {
   readonly property bool transientFailure:
     ["offline", "api-error"].indexOf(service.state) !== -1
 
-  readonly property bool showNumbers: root.hasBattery && !root.authBlocked
+  readonly property bool showNumbers: root.hasValue && !root.authBlocked
   readonly property bool showStaleMark:
     root.showNumbers && (service.state === "stale" || root.transientFailure)
   readonly property bool degraded:
     root.authBlocked || root.transientFailure || service.state === "stale"
 
   readonly property string displayText: {
-    var t = root.boltGlyph + (root.showNumbers ? root.bb : "—")
+    var t = root.metricGlyph + root.metricGap + (root.showNumbers ? root.metricText : "—")
     if (root.showNumbers && root.showSteps && root.stepCount !== null)
       t += "  " + (root.stepCount / 1000).toFixed(1) + "k"
     if (root.showStaleMark) t += " ·"
@@ -133,16 +212,31 @@ BarWidget {
 
   readonly property var verticalLines: root.displayText.split("  ")
 
-  // Colour carries the reading, not the state: accent when you have battery
-  // left, urgent when you are nearly empty, plain in between. Degraded states
-  // stay plain and dim so a broken helper never looks like a health alarm.
+  // Colour carries the reading, not the state: accent when the number is good
+  // news, urgent when it is bad news, plain in between. Degraded states stay
+  // plain and dim so a broken helper never looks like a health alarm.
+  //
+  // The bands are per metric and match the panel's cards, so the chip and the
+  // card for the same metric never disagree about whether today is good.
+  // Steps are the one metric with no urgent band: being short of a step goal
+  // at 11am is not an emergency, it is the middle of a day.
+  readonly property string levelTone: {
+    if (!root.showNumbers || root.degraded) return ""
+    var v = root.metricValue
+    switch (root.barMetric) {
+    case "steps": return root.stepGoal > 0 && v >= root.stepGoal ? "accent" : ""
+    case "readiness": return v >= 75 ? "accent" : (v < 35 ? "urgent" : "")
+    default: return v >= 60 ? "accent" : (v < 30 ? "urgent" : "")
+    }
+  }
+
+  readonly property bool levelIsNotable: root.levelTone !== ""
+
   // Taken off the bar where the bar defines it, so a transparent bar's
   // recoloured foreground carries through instead of being overpainted.
-  readonly property bool levelIsNotable:
-    root.showNumbers && !root.degraded && (root.bb >= 60 || root.bb < 30)
-  readonly property color levelColor: root.bb >= 60
-    ? (root.bar && root.bar.accent !== undefined ? root.bar.accent : Color.accent)
-    : (root.bar ? root.bar.urgent : Color.urgent)
+  readonly property color levelColor: root.levelTone === "urgent"
+    ? (root.bar ? root.bar.urgent : Color.urgent)
+    : (root.bar && root.bar.accent !== undefined ? root.bar.accent : Color.accent)
 
   readonly property string asOfText: service.payload && service.payload.asOf ? String(service.payload.asOf) : ""
 
@@ -160,7 +254,7 @@ BarWidget {
   }
 
   readonly property string tooltip: {
-    var lines = ["Body Battery" + (root.showNumbers ? " " + root.bb : "")]
+    var lines = [root.metricLabel + (root.showNumbers ? " " + root.metricText : "")]
     lines.push(root.stateLabel)
     if (service.lastError !== "" && service.state !== "live") lines.push(service.lastError)
     lines.push("left detail · middle refresh")
