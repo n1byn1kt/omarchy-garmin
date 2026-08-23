@@ -3,7 +3,7 @@
 Today's Garmin health at a glance: **Body Battery** in the bar — or steps, sleep
 or readiness, your pick — and a click-away panel of the metrics you care about.
 
-![Garmin panel and bar chip](preview.png)
+![Garmin panel](preview.png)
 
 ---
 
@@ -53,6 +53,8 @@ older one; the footer's `· stale` is what tells you so.
 ---
 
 ## Rearranging the cards from the panel
+
+![Editing cards](docs/edit-mode.png)
 
 The pencil in the panel header opens **edit mode**, and everything about which
 cards you see lives there — no config file, no shell restart:
