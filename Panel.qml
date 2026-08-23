@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import qs.Commons
 import qs.Ui
@@ -561,6 +562,20 @@ Panel {
     "custom": "Custom command"
   })
 
+  // The custom row is the one edit-list entry whose meaning the user chose
+  // themselves, so it names their card once the command has actually produced
+  // one — "Custom: Disk" reads as a thing they configured, where "Custom
+  // command" reads as a slot they never filled. Before the first payload (or
+  // when the command is unset or failing) there is no title to show and the
+  // plain label is the honest answer.
+  function editLabel(token) {
+    if (token === "custom") {
+      var title = root.customCard ? String(root.customCard.title || "") : ""
+      return title !== "" ? "Custom: " + title : "Custom command"
+    }
+    return root.metricLabels[token] || token
+  }
+
   // Precedence: prefs.json (the panel's own edit mode) > the shell.json
   // setting > the built-in default. The pref is the most recent thing the user
   // chose by hand, so it wins; deleting prefs.json hands control straight back
@@ -807,7 +822,7 @@ Panel {
       return {
         "kind": "metric",
         "show": count !== null || root.emptyToday,
-        "icon": "󱅈",
+        "icon": "󱊽",  // nf-md-stairs_up, U+F12BD
         "title": "Floors",
         "value": root.fmtNumber(count),
         "caption": fgoal === null ? "" : "goal " + root.fmtNumber(fgoal),
@@ -1301,7 +1316,14 @@ Panel {
           Repeater {
             model: root.cardRows
 
-            Row {
+            // A RowLayout rather than a Row so both cards in a dense pair end
+            // up the same height: the layout's own height is the taller card's
+            // implicit height, and `Layout.fillHeight` stretches the shorter
+            // one to match. With a plain Row each card kept its own height and
+            // a meter-less card next to a metered one left a visible step in
+            // the tinted background. Single-card rows are unaffected — one
+            // child means the max is that child.
+            RowLayout {
               id: cardRow
               required property var modelData
 
@@ -1321,13 +1343,19 @@ Panel {
                   readonly property var card: root.cardFor(cardSlot.modelData)
                   readonly property bool isCurve: cardSlot.card.kind === "curve"
 
-                  width: cardRow.cellWidth
-                  height: isCurve ? curveCard.implicitHeight : metricCard.implicitHeight
+                  // implicitHeight is what the layout measures; `height` is
+                  // what it hands back, equalised across the row. Neither card
+                  // derives its implicitHeight from its height, so there is no
+                  // binding loop here.
+                  Layout.preferredWidth: cardRow.cellWidth
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  implicitHeight: cardSlot.isCurve ? curveCard.implicitHeight : metricCard.implicitHeight
 
                   CurveCard {
                     id: curveCard
                     width: parent.width
-                    height: implicitHeight
+                    height: cardSlot.height
                     visible: cardSlot.isCurve
                     // Gates the Canvas: only the card that is actually on
                     // screen pays for a paint texture.
@@ -1350,7 +1378,7 @@ Panel {
                   MetricCard {
                     id: metricCard
                     width: parent.width
-                    height: implicitHeight
+                    height: cardSlot.height
                     visible: !cardSlot.isCurve
                     icon: cardSlot.card.icon || ""
                     title: cardSlot.card.title || ""
@@ -1485,7 +1513,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 // The eye glyph carries the state, so the row reads the same
                 // whether the theme paints `selected` strongly or subtly.
-                text: (editRow.on ? "󰛐  " : "󰛑  ") + (root.metricLabels[editRow.modelData] || editRow.modelData)
+                text: (editRow.on ? "󰛐  " : "󰛑  ") + root.editLabel(editRow.modelData)
                 leftAlign: true
                 selected: editRow.on
                 hasCursor: editRow.cursored
