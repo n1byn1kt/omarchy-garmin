@@ -346,6 +346,42 @@ Panel {
     || root.num(root.bodyBattery ? root.bodyBattery.low : null) !== null
     || root.num(root.bodyBattery ? root.bodyBattery.high : null) !== null
 
+  // ---- The empty morning
+  //
+  // Before the watch has synced, the helper answers ok:true with every one of
+  // today's figures null while the cached week behind them is intact. Each
+  // card hides on its own missing value, so that payload emptied the whole
+  // Garmin section — seven days of real data on disk and nothing on screen.
+  //
+  // When the payload has exactly that shape — nothing for today, something for
+  // the week — the enabled cards render in empty form instead: "—" where the
+  // figure goes, meters and delta arrows suppressed, and the seven-day strips
+  // (which are history-fed and were always correct) still drawn. Every one of
+  // those allowances is gated on `emptyToday`, so a payload with any today
+  // value in it renders exactly as it did before.
+  //
+  // Weekly and historical metrics are deliberately not part of this test:
+  // intensity minutes is a week-to-date total and the last activity can be
+  // weeks old, so either can be present on a morning with no today data at
+  // all. Only figures that describe today count as today data.
+  readonly property bool hasTodayValues:
+    root.hasBatteryValues
+    || root.hasCurve
+    || root.num(root.sleepInfo ? root.sleepInfo.score : null) !== null
+    || root.num(root.sleepInfo ? root.sleepInfo.durationMin : null) !== null
+    || root.hasSteps
+    || root.num(root.payload ? root.payload.restingHr : null) !== null
+    || root.num(root.readinessInfo ? root.readinessInfo.score : null) !== null
+    || root.titleCase(root.readinessInfo ? root.readinessInfo.level : "") !== ""
+    || root.num(root.hrvInfo ? root.hrvInfo.lastNightAvg : null) !== null
+    || root.titleCase(root.hrvInfo ? root.hrvInfo.status : "") !== ""
+    || root.num(root.floorsInfo ? root.floorsInfo.count : null) !== null
+    || root.num(root.caloriesInfo ? root.caloriesInfo.total : null) !== null
+    || root.num(root.caloriesInfo ? root.caloriesInfo.active : null) !== null
+
+  readonly property bool emptyToday:
+    root.showRows && !root.hasTodayValues && root.historySorted.length > 0
+
   // ---- History-derived views
   //
   // Entries are keyed by date so a gap in the week stays a gap: the strip is
@@ -637,8 +673,12 @@ Panel {
       // panel's headline metric entirely, the slot falls back to the plain
       // battery card — unless the user's own list already asks for one, in
       // which case it would be the same card twice.
+      //
+      // On an empty morning the same fallback runs with no figure behind it:
+      // the battery card comes back as "—" over its seven-day strip, which is
+      // more use in this slot than a hole where the panel's headline was.
       if (!root.hasCurve) {
-        if (root.hasBatteryValues && root.metricTokens.indexOf("battery") === -1)
+        if ((root.hasBatteryValues || root.emptyToday) && root.metricTokens.indexOf("battery") === -1)
           return root.cardFor("battery", dense)
         return { "kind": "metric", "show": false }
       }
@@ -662,7 +702,7 @@ Panel {
         "kind": "metric",
         // `bodyBattery !== null` was always true — the helper emits the dict
         // whether or not it found anything to put in it.
-        "show": root.hasBatteryValues,
+        "show": root.hasBatteryValues || root.emptyToday,
         "icon": "󱐋",
         "title": "Body Battery",
         "value": root.batteryValue,
@@ -677,12 +717,14 @@ Panel {
       var d = root.deltaFor("sleepScore", false)
       return {
         "kind": "metric",
-        "show": score !== null || duration !== null,
+        "show": score !== null || duration !== null || root.emptyToday,
         "icon": "󰒲",
         "title": "Sleep",
         "value": root.sleepValue,
-        "delta": d.glyph,
-        "deltaTone": d.tone,
+        // An arrow on an empty card would be comparing two history entries
+        // neither of which is the figure the card is showing.
+        "delta": root.emptyToday ? "" : d.glyph,
+        "deltaTone": root.emptyToday ? "" : d.tone,
         "strip": dense ? [] : root.stripFor("sleepScore", 100)
       }
     }
@@ -690,14 +732,16 @@ Panel {
       var d2 = root.deltaFor("steps", false)
       return {
         "kind": "metric",
-        "show": root.hasSteps,
+        "show": root.hasSteps || root.emptyToday,
         "icon": "󰖃",
         "title": "Steps",
         "value": root.fmtSteps(root.stepsCount),
         "caption": "goal " + root.fmtSteps(root.stepsGoal),
-        "meterPercent": root.stepsProgress * 100,
-        "delta": d2.glyph,
-        "deltaTone": d2.tone,
+        // A zero-length meter under an em dash reads as "you have walked
+        // nothing today", which is a claim the payload has not made.
+        "meterPercent": root.emptyToday ? -1 : root.stepsProgress * 100,
+        "delta": root.emptyToday ? "" : d2.glyph,
+        "deltaTone": root.emptyToday ? "" : d2.tone,
         "strip": dense ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0))
       }
     }
@@ -706,7 +750,7 @@ Panel {
       var level = root.titleCase(root.readinessInfo ? root.readinessInfo.level : "")
       return {
         "kind": "metric",
-        "show": rs !== null || level !== "",
+        "show": rs !== null || level !== "" || root.emptyToday,
         "icon": "󰓅",
         "title": "Training readiness",
         "value": root.fmtNumber(rs),
@@ -718,12 +762,12 @@ Panel {
       var d3 = root.deltaFor("restingHr", true)
       return {
         "kind": "metric",
-        "show": root.num(root.payload ? root.payload.restingHr : null) !== null,
+        "show": root.num(root.payload ? root.payload.restingHr : null) !== null || root.emptyToday,
         "icon": "󰗶",
         "title": "Resting HR",
         "value": root.restingHrValue,
-        "delta": d3.glyph,
-        "deltaTone": d3.tone
+        "delta": root.emptyToday ? "" : d3.glyph,
+        "deltaTone": root.emptyToday ? "" : d3.tone
       }
     }
     case "hrv": {
@@ -735,7 +779,7 @@ Panel {
       if (weekly !== null) parts.push("7-day avg " + root.fmtNumber(weekly) + " ms")
       return {
         "kind": "metric",
-        "show": last !== null || status !== "",
+        "show": last !== null || status !== "" || root.emptyToday,
         "icon": "󰐰",
         "title": "HRV",
         "value": last === null ? "—" : root.fmtNumber(last) + " ms",
@@ -762,7 +806,7 @@ Panel {
       var fgoal = root.num(root.floorsInfo ? root.floorsInfo.goal : null)
       return {
         "kind": "metric",
-        "show": count !== null,
+        "show": count !== null || root.emptyToday,
         "icon": "󱅈",
         "title": "Floors",
         "value": root.fmtNumber(count),
@@ -776,7 +820,7 @@ Panel {
       var active = root.num(root.caloriesInfo ? root.caloriesInfo.active : null)
       return {
         "kind": "metric",
-        "show": total !== null || active !== null,
+        "show": total !== null || active !== null || root.emptyToday,
         "icon": "󰈸",
         "title": "Calories",
         "value": total === null ? "—" : root.fmtSteps(total) + " kcal",
@@ -1231,6 +1275,19 @@ Panel {
           // No section header here: the hero already says "Today", and two
           // TODAY labels stacked on top of each other just read as a bug.
           PanelSeparator { foreground: root.foreground }
+
+          // One line of explanation for the empty morning, so the row of em
+          // dashes reads as "the watch hasn't uploaded" rather than as a
+          // broken panel. Caption styling on purpose: nothing has gone wrong.
+          Text {
+            visible: root.emptyToday && root.visibleCardCount > 0
+            width: parent.width
+            text: "No data from your watch yet today — showing your week."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
 
           Text {
             visible: root.visibleCardCount === 0
