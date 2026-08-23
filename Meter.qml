@@ -38,6 +38,9 @@ Item {
     // to nothing looks identical to no data at all.
     width: root.clamped <= 0 ? 0 : Math.max(parent.height, parent.width * root.clamped / 100)
 
-    Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+    // Deliberately no `Behavior on width`. The panel rebuilds its card
+    // delegates on every poll, so a width animation does not animate a
+    // changing value — it replays a fill-from-zero sweep every few minutes on
+    // a number that did not move, which reads as the meter resetting itself.
   }
 }

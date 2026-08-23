@@ -267,34 +267,58 @@ Panel {
     root.payload && root.payload.history && root.payload.history.length !== undefined
       ? root.payload.history : []
 
-  function seriesLength(series) {
-    return series && series.length !== undefined ? series.length : 0
-  }
-
   readonly property var bbSeries: root.curveData && root.curveData.bodyBattery ? root.curveData.bodyBattery : null
   readonly property var stressSeries: root.curveData && root.curveData.stress ? root.curveData.stress : null
-  readonly property bool hasCurve:
-    root.seriesLength(root.bbSeries) >= 2 || root.seriesLength(root.stressSeries) >= 2
+
+  // The same filter CurveCard.clean() applies before it draws. Counting raw
+  // array entries here instead let a two-entry garbage series pass the gate
+  // and put a card with an empty plot on screen: the panel said "there is a
+  // curve", the card disagreed, and the user got the rectangle without the
+  // line. Both sides now count points that could actually be plotted.
+  function cleanSeries(series) {
+    var out = []
+    if (!series || series.length === undefined) return out
+    for (var i = 0; i < series.length; i++) {
+      var p = series[i]
+      if (!p || p.length === undefined || p.length < 2) continue
+      var t = root.num(p[0])
+      var v = root.num(p[1])
+      if (t === null || v === null) continue
+      out.push([t, v])
+    }
+    out.sort(function (a, b) { return a[0] - b[0] })
+    return out
+  }
+
+  readonly property var bbPoints: root.cleanSeries(root.bbSeries)
+  readonly property var stressPoints: root.cleanSeries(root.stressSeries)
+  readonly property bool bbDrawn: root.bbPoints.length >= 2
+  readonly property bool stressDrawn: root.stressPoints.length >= 2
+  readonly property bool hasCurve: root.bbDrawn || root.stressDrawn
 
   // The last stress sample, for the days Garmin gives us a stress curve but
   // no Body Battery to head the card with.
   readonly property var lastStress: {
-    var s = root.stressSeries
-    if (root.seriesLength(s) < 1) return null
-    var last = s[s.length - 1]
-    return (last && last.length >= 2) ? root.num(last[1]) : null
+    var s = root.stressPoints
+    return s.length < 1 ? null : s[s.length - 1][1]
   }
 
   // The clock range the curve actually covers, so nobody reads a half-day of
   // samples as a full day.
   readonly property string curveSpan: {
-    var pick = root.seriesLength(root.bbSeries) >= 2 ? root.bbSeries : root.stressSeries
-    if (root.seriesLength(pick) < 2) return ""
-    var first = pick[0], last = pick[pick.length - 1]
-    var a = root.fmtTimeOfDay(first && first.length ? first[0] : null)
-    var b = root.fmtTimeOfDay(last && last.length ? last[0] : null)
+    var pick = root.bbDrawn ? root.bbPoints : root.stressPoints
+    if (pick.length < 2) return ""
+    var a = root.fmtTimeOfDay(pick[0][0])
+    var b = root.fmtTimeOfDay(pick[pick.length - 1][0])
     return (a === "" || b === "") ? "" : a + "–" + b
   }
+
+  // Body Battery has something to show even when today's curve is missing:
+  // any one of current / low / high being a real number is a card's worth.
+  readonly property bool hasBatteryValues:
+    root.num(root.bodyBattery ? root.bodyBattery.current : null) !== null
+    || root.num(root.bodyBattery ? root.bodyBattery.low : null) !== null
+    || root.num(root.bodyBattery ? root.bodyBattery.high : null) !== null
 
   // ---- History-derived views
   //
@@ -469,11 +493,26 @@ Panel {
     return parsed.length > 0 ? parsed : root.parseMetrics(root.defaultMetrics)
   }
 
+  // The tokens that will actually put a card on screen. Counted with
+  // dense=false so this never reads denseLayout, which is derived from it —
+  // `show` is independent of density, so the count is exact either way.
+  readonly property var visibleTokens: {
+    var out = []
+    for (var i = 0; i < root.metricTokens.length; i++) {
+      if (root.cardFor(root.metricTokens[i], false).show === true) out.push(root.metricTokens[i])
+    }
+    return out
+  }
+
   // Past six cards the panel is taller than the numbers are worth, and there
   // is no scrolling here by design. Density is what gets cut: the seven-day
   // strips are the first thing to go, since the figure above each one is the
   // part people actually came for.
-  readonly property bool denseLayout: root.metricTokens.length > 6
+  //
+  // Counted over the cards that are on screen, not the tokens asked for: a
+  // long list of metrics this account has no data for produced a cramped,
+  // strip-less layout for the three cards that did render.
+  readonly property bool denseLayout: root.visibleTokens.length > 6
 
   function parseMetrics(raw) {
     var parts = String(raw || "").split(",")
@@ -498,10 +537,10 @@ Panel {
   readonly property var cardRows: {
     var rows = []
     var pending = ""
-    for (var i = 0; i < root.metricTokens.length; i++) {
-      var token = root.metricTokens[i]
-      var card = root.cardFor(token)
-      if (card.show !== true) continue
+    for (var i = 0; i < root.visibleTokens.length; i++) {
+      var token = root.visibleTokens[i]
+      // Only `kind` is needed here, and it does not depend on density.
+      var card = root.cardFor(token, false)
 
       // The curve is a chart, not a figure: it always gets the full width.
       if (card.kind === "curve") {
@@ -520,7 +559,7 @@ Panel {
   // A payload can be `ok` and still carry nothing we were asked to show — a
   // watch left on the charger all day, or a metric set nobody's account has.
   // The body says so rather than leaving a hero floating above a separator.
-  readonly property int visibleCardCount: root.cardRows.length
+  readonly property int visibleCardCount: root.visibleTokens.length
 
   // ---- Card descriptors
   //
@@ -528,21 +567,36 @@ Panel {
   // only decides where things sit, never what they say. `show: false` means
   // the payload had nothing for this metric, and the card disappears rather
   // than sitting there full of em dashes.
-  function cardFor(token) {
+  //
+  // `denseOverride` exists so the visible-card count can be taken without
+  // reading root.denseLayout — which is itself derived from that count, and
+  // would be a binding loop. Nothing about `show` depends on density, so
+  // counting with dense=false is exact.
+  function cardFor(token, denseOverride) {
+    var dense = denseOverride === undefined ? root.denseLayout : denseOverride === true
     switch (token) {
     case "curve": {
+      // No curve today does not mean no Body Battery: the figures can arrive
+      // without the intraday series behind them. Rather than dropping the
+      // panel's headline metric entirely, the slot falls back to the plain
+      // battery card — unless the user's own list already asks for one, in
+      // which case it would be the same card twice.
+      if (!root.hasCurve) {
+        if (root.hasBatteryValues && root.metricTokens.indexOf("battery") === -1)
+          return root.cardFor("battery", dense)
+        return { "kind": "metric", "show": false }
+      }
       // The header names whichever line is actually drawn. Garmin can return
       // a stress day with no Body Battery at all, and a "Body Battery 71"
       // header over a lone stress curve claims the wrong line.
       var bb = root.num(root.bodyBattery ? root.bodyBattery.current : null)
-      var bbDrawn = root.seriesLength(root.bbSeries) >= 2
       return {
         "kind": "curve",
-        "show": root.hasCurve,
-        "title": bbDrawn ? "Body Battery" : "Stress",
-        "icon": bbDrawn ? "󱐋" : "󰐰",
-        "value": bbDrawn ? root.batteryValue : root.fmtNumber(root.lastStress),
-        "tone": bbDrawn ? root.batteryTone(bb) : "",
+        "show": true,
+        "title": root.bbDrawn ? "Body Battery" : "Stress",
+        "icon": root.bbDrawn ? "󱐋" : "󰐰",
+        "value": root.bbDrawn ? root.batteryValue : root.fmtNumber(root.lastStress),
+        "tone": root.bbDrawn ? root.batteryTone(bb) : "",
         "caption": root.curveSpan
       }
     }
@@ -550,13 +604,15 @@ Panel {
       var current = root.num(root.bodyBattery ? root.bodyBattery.current : null)
       return {
         "kind": "metric",
-        "show": root.bodyBattery !== null,
+        // `bodyBattery !== null` was always true — the helper emits the dict
+        // whether or not it found anything to put in it.
+        "show": root.hasBatteryValues,
         "icon": "󱐋",
         "title": "Body Battery",
         "value": root.batteryValue,
         "caption": root.batteryMeta,
         "tone": root.batteryTone(current),
-        "strip": root.denseLayout ? [] : root.stripFor("bodyBatteryHigh", 100)
+        "strip": dense ? [] : root.stripFor("bodyBatteryHigh", 100)
       }
     }
     case "sleep": {
@@ -571,7 +627,7 @@ Panel {
         "value": root.sleepValue,
         "delta": d.glyph,
         "deltaTone": d.tone,
-        "strip": root.denseLayout ? [] : root.stripFor("sleepScore", 100)
+        "strip": dense ? [] : root.stripFor("sleepScore", 100)
       }
     }
     case "steps": {
@@ -586,7 +642,7 @@ Panel {
         "meterPercent": root.stepsProgress * 100,
         "delta": d2.glyph,
         "deltaTone": d2.tone,
-        "strip": root.denseLayout ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0))
+        "strip": dense ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0))
       }
     }
     case "readiness": {
@@ -688,7 +744,7 @@ Panel {
         "icon": "󰜎",
         // Two cards to a row leaves no space for "Last activity" — it elides
         // to "Last a…", which reads like a rendering bug rather than a title.
-        "title": root.denseLayout ? "Activity" : "Last activity",
+        "title": dense ? "Activity" : "Last activity",
         "value": type === "" ? "—" : type,
         "caption": meta.join(" · ")
       }

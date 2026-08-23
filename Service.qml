@@ -122,7 +122,7 @@ Item {
     root.fail(code, String(payload.detail || payload.hint || payload.error || ""))
   }
 
-  // A failure never discards `data`. Losing the network is not a reason to
+  // A failure never discards `payload`. Losing the network is not a reason to
   // forget this morning's Body Battery — it is a reason to mark it stale.
   function fail(code, detail) {
     root.lastError = detail

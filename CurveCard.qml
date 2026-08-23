@@ -124,7 +124,10 @@ Rectangle {
 
     Loader {
       width: parent.width
-      height: Style.space(58)
+      // Height follows the cleaned data, not just `active`: a series that
+      // survives the payload but not clean() would otherwise reserve a plot
+      // rectangle that nothing ever paints into.
+      height: card.hasAny ? Style.space(58) : 0
       active: card.active && card.hasAny
 
       sourceComponent: Canvas {
@@ -157,8 +160,12 @@ Rectangle {
               if (points[i][0] > tMax) tMax = points[i][0]
             }
           }
-          span(bb)
-          span(stress)
+          // Only the series that will actually be drawn may stretch the axis.
+          // drawSeries() skips anything shorter than two points, so letting a
+          // lone stray sample into the span would slide the drawn curve into a
+          // corner of a plot whose other half stays empty.
+          if (bb && bb.length >= 2) span(bb)
+          if (stress && stress.length >= 2) span(stress)
           if (!isFinite(tMin) || !isFinite(tMax) || tMax <= tMin) return
 
           // Both series are 0–100 scores, so the axis is fixed rather than
