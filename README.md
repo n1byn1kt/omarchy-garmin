@@ -142,8 +142,9 @@ than the poll interval.
   the top. Changes apply live and persist in `prefs.json`, which overrides the
   matching settings.
 - **A card of your own.** `customCommand` runs anything that prints a small JSON
-  object and shows it as a card — sandboxed behind a timeout, an output cap and
-  a defensive parser, so a broken script costs you that card and nothing else.
+  object and shows it as a card — it runs as your own user (no sandbox), bounded
+  by a 10s timeout, an 8KB output cap and a defensive parser, so a broken script
+  costs you that card and nothing else.
 - **`prefs` subcommand.** `garmin-widget prefs get|set KEY VALUE` is the only
   writer of `prefs.json`; the panel calls it rather than touching disk itself.
 

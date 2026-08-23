@@ -310,8 +310,11 @@ Item {
     // by head's 0 — acceptable, because what decides whether a card renders is
     // the *content*: over-cap is measured on the bytes collected, and anything
     // that is not a well-formed card fails the parse regardless of exit status.
+    // The user's command line is passed via argv ($1), never spliced into the
+    // wrapper source below — a value containing `}; anything; {` cannot escape
+    // the parsed script this way, so the head -c cap always bounds output.
     customProcess.command = ["bash", "-c",
-      "{ " + String(root.customCommand) + " ; } | head -c 8193"]
+      "bash -c \"$1\" | head -c 8193", "garmin-custom", String(root.customCommand)]
     customProcess.running = true
     customWatchdog.restart()
   }
@@ -325,11 +328,11 @@ Item {
 
   function runCustomIfPrimary() {
     if (!root._started) return
-    var allowed = true
+    var allowed = false
     try {
       allowed = root.canPoll()
     } catch (e) {
-      allowed = true
+      allowed = false
     }
     if (allowed) root.runCustom()
   }
