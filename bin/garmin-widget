@@ -391,7 +391,9 @@ def cmd_fetch() -> int:
         # ambient umask, whether or not the rest of the call succeeded.
         if TOKENS_PATH.exists():
             _secure_tokens()
-    payload["history"] = _update_history(payload, today)
+    # `g` is passed so the first successful fetch can backfill the week; a
+    # stale or failed fetch returned above and never gets here.
+    payload["history"] = _update_history(payload, today, g)
     _write_cache(payload)
     return emit(payload)
 
@@ -430,26 +432,93 @@ def _write_cache(payload) -> None:
     _atomic_write(CACHE_PATH, payload, ".last-")
 
 def _load_history():
-    """Whatever of history.json is usable, as a list. Never raises.
+    """(days, backfilled) — whatever of history.json is usable. Never raises.
 
     A truncated or hand-edited file must not cost the user their fetch, so
     anything unreadable is treated as "no history yet" and gets overwritten
-    on the next successful poll.
+    on the next successful poll. Pre-0.3 installs wrote the bare day list;
+    that reads as "backfill not attempted yet" and is rewritten wrapped.
     """
     try:
         data = json.loads(HISTORY_PATH.read_text())
     except Exception:
-        return []
+        return [], False
+    backfilled = False
+    if isinstance(data, dict):
+        backfilled = data.get("backfilled") is True
+        data = data.get("days")
     if not isinstance(data, list):
-        return []
-    return [e for e in data
-            if isinstance(e, dict) and isinstance(e.get("date"), str)]
+        return [], False
+    return ([e for e in data
+             if isinstance(e, dict) and isinstance(e.get("date"), str)],
+            backfilled)
 
-def _update_history(payload, today):
+
+def _dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+def _ranged_steps(g, start, end):
+    """{date: steps} for a date range, from the one call that covers a week.
+
+    get_daily_steps returns [{"calendarDate", "totalSteps", ...}]. Six
+    per-day calls would work too; this is one, which is the whole reason the
+    backfill fits in a single burst.
+    """
+    out = {}
+    for row in _safe(lambda: g.get_daily_steps(start, end)) or []:
+        if isinstance(row, dict) and isinstance(row.get("calendarDate"), str):
+            out[row["calendarDate"]] = _num(row.get("totalSteps"))
+    return out
+
+
+def _backfill(g, history, today):
+    """Fill in the past week's history entries. Called at most once, ever.
+
+    A fresh install has one day of history, so every seven-day strip in the
+    panel is six-sevenths empty until a week of polling goes by. This pulls
+    the missing days once: one ranged steps call plus, per missing day, the
+    sleep and user-summary calls that carry the other three fields
+    (restingHeartRate and bodyBatteryHighestValue both live in the summary,
+    so get_rhr_day would be a third call for data already in hand).
+
+    Every call is _safe-wrapped: a day Garmin has nothing for, or an endpoint
+    that 500s, costs that field and nothing else.
+    """
+    have = {e.get("date") for e in history}
+    start = datetime.date.fromisoformat(today)
+    missing = [d for d in
+               ((start - datetime.timedelta(days=n)).isoformat()
+                for n in range(HISTORY_DAYS - 1, 0, -1))
+               if d not in have]
+    if not missing:
+        return history
+    steps = _ranged_steps(g, missing[0], missing[-1])
+    for day in missing:
+        summary = _dict(_safe(lambda: g.get_user_summary(day)))
+        sleep = _dict(_safe(lambda: g.get_sleep_data(day)))
+        entry = {
+            "date": day,
+            "sleepScore": _get(sleep, "dailySleepDTO", "sleepScores",
+                               "overall", "value"),
+            "steps": steps.get(day, summary.get("totalSteps")),
+            "bodyBatteryHigh": summary.get("bodyBatteryHighestValue"),
+            "restingHr": summary.get("restingHeartRate"),
+        }
+        # A day the watch was in a drawer has nothing worth a row. The marker
+        # below — not the presence of a row — is what stops the retry.
+        if any(v is not None for k, v in entry.items() if k != "date"):
+            history.append(entry)
+    return history
+
+
+def _update_history(payload, today, g=None):
     """Record today's snapshot and return the trailing week of them.
 
     Deltas and sparklines are computed QML-side from this list, which is why
-    it ships inside the payload rather than being read separately.
+    it ships inside the payload rather than being read separately. The
+    payload keeps carrying a plain list; the {"backfilled", "days"} wrapper
+    is the on-disk format only.
     """
     try:
         entry = {
@@ -459,11 +528,22 @@ def _update_history(payload, today):
             "bodyBatteryHigh": _get(payload, "bodyBattery", "high"),
             "restingHr": payload.get("restingHr"),
         }
-        history = [e for e in _load_history() if e.get("date") != today]
+        history, backfilled = _load_history()
+        history = [e for e in history if e.get("date") != today]
         history.append(entry)
+        if g is not None and not backfilled:
+            if len({e.get("date") for e in history}) < HISTORY_DAYS:
+                try:
+                    history = _backfill(g, history, today)
+                except Exception:
+                    # Best-effort and one-shot: whatever broke in there, the
+                    # marker still goes down so the burst never repeats.
+                    pass
+            backfilled = True
         history.sort(key=lambda e: e["date"])
         history = history[-HISTORY_DAYS:]
-        _atomic_write(HISTORY_PATH, history, ".history-")
+        _atomic_write(HISTORY_PATH, {"backfilled": backfilled,
+                                     "days": history}, ".history-")
         return history
     except Exception:
         return []

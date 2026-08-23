@@ -166,7 +166,7 @@ def test_history_records_today_and_is_returned_in_the_payload(home, fake_garmin,
         "date": mod.datetime.date.today().isoformat(), "sleepScore": 65,
         "steps": 8000, "bodyBatteryHigh": 90, "restingHr": 52}
     on_disk = json.loads(mod.HISTORY_PATH.read_text())
-    assert on_disk == out["history"]
+    assert on_disk["days"] == out["history"]
 
 
 def test_history_updates_todays_entry_in_place(home, fake_garmin, capsys):

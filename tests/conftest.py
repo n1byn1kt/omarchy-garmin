@@ -4,7 +4,12 @@ import os
 import sys
 import types
 import pathlib
+import datetime
 import pytest
+
+
+def _today():
+    return datetime.date.today().isoformat()
 
 HELPER = pathlib.Path(__file__).resolve().parent.parent / "bin" / "garmin-widget"
 
@@ -48,6 +53,13 @@ class FakeGarmin:
     """
     summary = {}
     sleep = {}
+    # Past-day responses for the one-time backfill, keyed by ISO date. A date
+    # with no entry answers {} — what Garmin returns for a day it has nothing
+    # for — so backfill tests have to opt into every day they expect filled.
+    summary_by_date = {}
+    sleep_by_date = {}
+    daily_steps = None
+    calls = []        # every API method call, in order, for budget assertions
     login_exc = None
     body_battery = None
     stress = None
@@ -60,7 +72,8 @@ class FakeGarmin:
     def __init__(self, *a, **kw):
         self.client = FakeClient()
 
-    def _maybe_raise(self, name):
+    def _maybe_raise(self, name, *args):
+        FakeGarmin.calls.append((name, args))
         e = FakeGarmin.exc.get(name)
         if e:
             raise e
@@ -71,12 +84,20 @@ class FakeGarmin:
         return ("oauth1", "oauth2")
 
     def get_user_summary(self, cdate):
-        self._maybe_raise("get_user_summary")
-        return FakeGarmin.summary
+        self._maybe_raise("get_user_summary", cdate)
+        if cdate == _today():
+            return FakeGarmin.summary
+        return FakeGarmin.summary_by_date.get(cdate, {})
 
     def get_sleep_data(self, cdate):
-        self._maybe_raise("get_sleep_data")
-        return FakeGarmin.sleep
+        self._maybe_raise("get_sleep_data", cdate)
+        if cdate == _today():
+            return FakeGarmin.sleep
+        return FakeGarmin.sleep_by_date.get(cdate, {})
+
+    def get_daily_steps(self, start, end):
+        self._maybe_raise("get_daily_steps", start, end)
+        return FakeGarmin.daily_steps
 
     def get_body_battery(self, cdate, *a):
         self._maybe_raise("get_body_battery")
@@ -119,6 +140,10 @@ def fake_garmin(monkeypatch):
     FakeGarmin.readiness = None
     FakeGarmin.intensity = None
     FakeGarmin.last_activity = None
+    FakeGarmin.summary_by_date = {}
+    FakeGarmin.sleep_by_date = {}
+    FakeGarmin.daily_steps = None
+    FakeGarmin.calls = []
     FakeGarmin.exc = {}
     monkeypatch.setitem(sys.modules, "garminconnect", fake)
     return FakeGarmin

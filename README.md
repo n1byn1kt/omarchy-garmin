@@ -180,7 +180,7 @@ Everything this plugin writes lives under your home directory:
 |---|---|
 | `~/.config/garmin-widget/tokens.json` | Garmin OAuth tokens, mode `0600`. No password. |
 | `~/.cache/garmin-widget/last.json` | Last successful reading, so the bar can show yesterday's numbers while offline. |
-| `~/.cache/garmin-widget/history.json` | Up to seven daily snapshots (sleep score, steps, Body Battery high, resting HR) — the source of the panel's strips and deltas. |
+| `~/.cache/garmin-widget/history.json` | Up to seven daily snapshots (sleep score, steps, Body Battery high, resting HR) — the source of the panel's strips and deltas. The first successful fetch backfills the past six days once, so the strips are full from the start; the `backfilled` flag in the file is what stops it running again. |
 | `~/.local/share/garmin-widget/venv/` | The dedicated virtualenv holding `garminconnect`. |
 
 ---
