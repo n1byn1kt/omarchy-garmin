@@ -190,6 +190,114 @@ def test_reexec_execv_failure_falls_through_to_deps_payload(home, monkeypatch, c
         os.environ.pop("GARMIN_WIDGET_REEXEC", None)
 
 
+def test_fetch_tightens_tokens_permissions(home, fake_garmin, capsys):
+    """garminconnect's Client.dump() rewrites tokens.json at the default umask
+    whenever login(tokenstore=) refreshes it, so the helper re-chmods after
+    every call that can touch the file."""
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    mod = load_helper()
+    _with_tokens(mod)
+    mod.TOKENS_PATH.chmod(0o644)
+    mod.TOKENS_PATH.parent.chmod(0o755)  # what older installs left behind
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is True
+    assert oct(mod.TOKENS_PATH.stat().st_mode & 0o777) == "0o600"
+    assert oct(mod.TOKENS_PATH.parent.stat().st_mode & 0o777) == "0o700"
+
+
+def test_fetch_tightens_tokens_permissions_after_failure(home, fake_garmin, capsys):
+    """A refresh can rewrite the file and then fail; the chmod must still run."""
+    fake_garmin.login_exc = ConnectionError("boom")
+    mod = load_helper()
+    _with_tokens(mod)
+    mod.TOKENS_PATH.chmod(0o644)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["ok"] is False
+    assert oct(mod.TOKENS_PATH.stat().st_mode & 0o777) == "0o600"
+
+
+def test_cache_file_is_owner_only(home, fake_garmin, capsys):
+    fake_garmin.summary, fake_garmin.sleep = SUMMARY, SLEEP
+    mod = load_helper()
+    _with_tokens(mod)
+    run(mod, ["fetch"], capsys)
+    assert oct(mod.CACHE_PATH.stat().st_mode & 0o777) == "0o600"
+
+
+def test_detail_is_exception_class_name_only(home, fake_garmin, capsys):
+    """str(e) can carry the account email or a home-directory path into a
+    tooltip; the class name is all the user needs to tell states apart."""
+    fake_garmin.login_exc = RuntimeError("bad thing for user@example.com at /home/user")
+    mod = load_helper()
+    _with_tokens(mod)
+    rc, out = run(mod, ["fetch"], capsys)
+    assert out["error"] == "api-error"
+    assert out["detail"] == "RuntimeError"
+
+
+def _login_inputs(monkeypatch):
+    import builtins
+    import getpass
+    monkeypatch.setattr(builtins, "input", lambda *a: "user@example.com")
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "hunter2")
+
+
+class TooManyRequestsError(Exception):
+    pass
+
+
+def test_login_rate_limit_is_api_error(home, fake_garmin, monkeypatch, capsys):
+    _login_inputs(monkeypatch)
+    fake_garmin.login_exc = TooManyRequestsError("429")
+    mod = load_helper()
+    rc, out = run(mod, ["login"], capsys)
+    assert out["ok"] is False
+    assert out["error"] == "api-error"
+    assert out["detail"] == "TooManyRequestsError"
+
+
+def test_login_connection_error_is_offline(home, fake_garmin, monkeypatch, capsys):
+    _login_inputs(monkeypatch)
+    fake_garmin.login_exc = ConnectionError("no route")
+    mod = load_helper()
+    rc, out = run(mod, ["login"], capsys)
+    assert out["ok"] is False and out["error"] == "offline"
+    assert out["detail"] == "ConnectionError"
+
+
+def test_login_bad_credentials_still_auth_expired(home, fake_garmin, monkeypatch, capsys):
+    _login_inputs(monkeypatch)
+    fake_garmin.login_exc = ValueError("nope")
+    mod = load_helper()
+    rc, out = run(mod, ["login"], capsys)
+    assert out["ok"] is False and out["error"] == "auth-expired"
+    assert out["detail"] == "ValueError"
+
+
+def test_config_dir_is_owner_only(home, fake_garmin, monkeypatch, capsys):
+    _login_inputs(monkeypatch)
+    mod = load_helper()
+    rc, out = run(mod, ["login"], capsys)
+    assert out["ok"] is True
+    assert oct(mod.TOKENS_PATH.parent.stat().st_mode & 0o777) == "0o700"
+    assert oct(mod.TOKENS_PATH.stat().st_mode & 0o777) == "0o600"
+
+
+def test_unexpected_exception_still_emits_json_and_exit_zero(home, monkeypatch, capsys):
+    """The JSON-always/exit-0 contract has to survive helper bugs too — an
+    EOFError from a non-interactive login, an AttributeError from a library
+    upgrade. A traceback on stdout would blank the bar chip."""
+    mod = load_helper()
+
+    def boom():
+        raise EOFError("no stdin")
+
+    monkeypatch.setattr(mod, "cmd_status", boom)
+    rc, out = run(mod, ["status"], capsys)
+    assert rc == 0
+    assert out == {"ok": False, "error": "api-error", "detail": "EOFError"}
+
+
 def test_reexec_not_attempted_when_garminconnect_present(home, fake_garmin, monkeypatch, capsys):
     """Existing fake_garmin-backed tests must stay green: importable
     garminconnect means no re-exec is attempted at all."""

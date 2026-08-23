@@ -60,8 +60,7 @@ def _maybe_reexec_into_venv(argv) -> None:
         # payload rather than crash before printing any JSON at all.
         pass
 
-def main(argv) -> int:
-    _maybe_reexec_into_venv(argv)
+def _dispatch(argv) -> int:
     cmd = argv[0] if argv else "fetch"
     if cmd == "status":
         return cmd_status()
@@ -69,7 +68,22 @@ def main(argv) -> int:
         return cmd_fetch()
     if cmd == "login":
         return cmd_login()
-    return emit({"ok": False, "error": "api-error", "detail": f"unknown command {cmd!r}"})
+    return emit({"ok": False, "error": "api-error", "detail": "unknown-command"})
+
+def main(argv) -> int:
+    """Dispatch, and hold the JSON-always/exit-0 contract come what may.
+
+    The bar reads stdout and nothing else. A traceback there — an EOFError
+    from a login with no stdin, an AttributeError after a garminconnect
+    upgrade — would blank the chip with "unparseable helper output" and give
+    the user nothing to act on. Every bug lands here as an api-error instead.
+    """
+    _maybe_reexec_into_venv(argv)
+    try:
+        return _dispatch(argv)
+    except Exception as e:
+        return emit({"ok": False, "error": "api-error",
+                     "detail": type(e).__name__})
 
 def _get(d, *keys):
     for k in keys:
@@ -94,6 +108,47 @@ def build_payload(summary, sleep, as_of):
                   "goal": summary.get("dailyStepGoal")},
         "restingHr": summary.get("restingHeartRate"),
     }
+
+def _secure_tokens() -> None:
+    """Re-tighten tokens.json to 0600, best-effort.
+
+    garminconnect refreshes the OAuth token behind our back inside
+    login(tokenstore=...) and writes it back through Client.dump(), which
+    honours the ambient umask — a 0600 file we created becomes 0644 the first
+    time the token rolls over. These are bearer credentials for the account,
+    so the mode is re-asserted after every call that can rewrite the file.
+    """
+    try:
+        TOKENS_PATH.chmod(0o600)
+        # Also the directory: installs made by an earlier version of this
+        # helper left it at 0755, and fetch is the code path that actually
+        # runs on those machines.
+        TOKENS_PATH.parent.chmod(0o700)
+    except OSError:
+        pass
+
+def _secure_config_dir() -> None:
+    """Create ~/.config/garmin-widget as 0700 (and tighten it if it exists)."""
+    try:
+        TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        TOKENS_PATH.parent.chmod(0o700)
+    except OSError:
+        pass
+
+def _classify(e, default="api-error") -> str:
+    """Sort an exception into an error category the widget knows how to show.
+
+    Rate limiting is the API talking — not the network, and not a bad
+    password. `default` is what everything unrecognised becomes: api-error
+    during a fetch, but auth-expired during a login, where a plain failure
+    really does mean the credentials did not work.
+    """
+    name = type(e).__name__
+    if "TooManyRequests" in name:
+        return "api-error"
+    if isinstance(e, (ConnectionError, OSError, TimeoutError)) or "Connection" in name:
+        return "offline"
+    return default
 
 def _load_cache():
     try:
@@ -124,11 +179,16 @@ def cmd_fetch() -> int:
         if cached is not None:
             cached["stale"] = True
             return emit(cached)
-        offline = (isinstance(e, (ConnectionError, OSError, TimeoutError))
-                   or "Connection" in type(e).__name__)
-        return emit({"ok": False,
-                     "error": "offline" if offline else "api-error",
-                     "detail": str(e)[:200]})
+        # detail is the exception *class name* only. str(e) on a garminconnect
+        # error routinely carries the account email or a token path, and this
+        # string ends up in a bar tooltip.
+        return emit({"ok": False, "error": _classify(e),
+                     "detail": type(e).__name__})
+    finally:
+        # login() may have refreshed and rewritten the token file at the
+        # ambient umask, whether or not the rest of the call succeeded.
+        if TOKENS_PATH.exists():
+            _secure_tokens()
     _write_cache(payload)
     return emit(payload)
 
@@ -150,6 +210,10 @@ def _write_cache(payload) -> None:
             json.dump(payload, fh)
         os.replace(tmp, CACHE_PATH)  # same directory, so this is atomic
         tmp = None
+        # mkstemp already made it 0600 and os.replace preserves that, but the
+        # cache holds a day of health data, so the mode is asserted rather
+        # than assumed.
+        os.chmod(CACHE_PATH, 0o600)
     except Exception:
         pass  # cache write is best-effort; must never break fetch
     finally:
@@ -180,12 +244,17 @@ def cmd_login() -> int:
         g = gc.Garmin(email=email, password=password,
                       prompt_mfa=_prompt_mfa)
         g.login()
-        TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _secure_config_dir()
         g.client.dump(str(TOKENS_PATH))
-        TOKENS_PATH.chmod(0o600)
     except Exception as e:
-        return emit({"ok": False, "error": "auth-expired",
-                     "detail": str(e)[:200]})
+        # Rate limits and dead networks are not bad credentials. Reporting
+        # them as auth-expired sends the user back into the login they just
+        # completed, which on a 429 only extends the block.
+        return emit({"ok": False, "error": _classify(e, default="auth-expired"),
+                     "detail": type(e).__name__})
+    finally:
+        if TOKENS_PATH.exists():
+            _secure_tokens()
     return emit({"ok": True, "tokens": str(TOKENS_PATH)})
 
 if __name__ == "__main__":

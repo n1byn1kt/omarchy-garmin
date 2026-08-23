@@ -25,6 +25,20 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+class FakeClient:
+    """Stands in for garminconnect's inner Client.
+
+    dump() deliberately writes at the ambient umask, exactly as the real one
+    does — that is the whole reason the helper re-chmods afterwards.
+    """
+
+    def dump(self, path):
+        p = pathlib.Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"oauth1": "x"}')
+        p.chmod(0o644)
+
+
 class FakeGarmin:
     """Stands in for garminconnect.Garmin; behavior injected per-test."""
     summary = {}
@@ -32,7 +46,7 @@ class FakeGarmin:
     login_exc = None
 
     def __init__(self, *a, **kw):
-        pass
+        self.client = FakeClient()
 
     def login(self, tokenstore=None):
         if FakeGarmin.login_exc:
