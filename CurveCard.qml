@@ -44,10 +44,17 @@ Rectangle {
   // Points are [timestamp, value] pairs; both have to be finite numbers for
   // the point to mean anything, and the series has to have two of them before
   // there is a line to draw at all.
+  //
+  // The caps mirror Panel.cleanSeries: the helper ships at most 96 points per
+  // series, so a real payload is never touched, but this data comes off disk
+  // and the Canvas would happily try to stroke a 200k-point path.
+  readonly property int inputCap: 500
+  readonly property int pointCap: 96
   function clean(series) {
     var out = []
     if (!series || series.length === undefined) return out
-    for (var i = 0; i < series.length; i++) {
+    var n = Math.min(series.length, card.inputCap)
+    for (var i = 0; i < n; i++) {
       var p = series[i]
       if (!p || p.length === undefined || p.length < 2) continue
       var t = Number(p[0])
@@ -56,7 +63,8 @@ Rectangle {
       out.push([t, v])
     }
     out.sort(function (a, b) { return a[0] - b[0] })
-    return out
+    return out.length > card.pointCap
+      ? out.slice(out.length - card.pointCap) : out
   }
 
   readonly property var bbPoints: card.clean(card.bodyBatterySeries)

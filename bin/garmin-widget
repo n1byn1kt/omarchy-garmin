@@ -42,6 +42,31 @@ DEPS_HINT = ("python3 -m venv ~/.local/share/garmin-widget/venv && "
 def _venv_python() -> Path:
     return _home() / ".local" / "share" / "garmin-widget" / "venv" / "bin" / "python"
 
+def _trusted_interpreter(path: Path) -> bool:
+    """True only if exec'ing `path` can't hand the session to someone else.
+
+    The re-exec below runs whatever sits at that path with this user's
+    privileges, so the file has to be unwritable by anyone else and owned by
+    someone who already has that power: us, or root. A venv python owned by
+    *another* unprivileged account, or one anybody can write to, is an install
+    bug at best and a foothold at worst.
+
+    Both the symlink and its target are checked, because `venv/bin/python` is
+    normally a symlink chain ending at the root-owned system interpreter — the
+    link is ours, the binary is root's, and either one being someone else's is
+    the thing worth refusing. Refusing is cheap: the caller falls through to
+    the deps payload, which tells the user how to rebuild the venv.
+    """
+    try:
+        link, st = os.lstat(path), os.stat(path)
+    except OSError:
+        return False
+    trusted = (os.geteuid(), 0)
+    if link.st_uid not in trusted or st.st_uid not in trusted:
+        return False
+    return not st.st_mode & 0o022
+
+
 def _maybe_reexec_into_venv(argv) -> None:
     """Arch (and other PEP 668 distros) block pip into system python.
 
@@ -53,7 +78,7 @@ def _maybe_reexec_into_venv(argv) -> None:
     if HAS_GARMINCONNECT or "GARMIN_WIDGET_REEXEC" in os.environ:
         return
     venv_py = _venv_python()
-    if not venv_py.exists():
+    if not _trusted_interpreter(venv_py):
         return
     os.environ["GARMIN_WIDGET_REEXEC"] = "1"
     try:
@@ -351,11 +376,30 @@ def _classify(e, default="api-error") -> str:
         return "offline"
     return default
 
+SAFE_HINTS = (DEPS_HINT, "run: garmin-widget login")
+
+
 def _load_cache():
+    """The last good payload, with its advisory strings re-derived, or None.
+
+    Anything that can write ~/.cache/garmin-widget/last.json chooses text the
+    panel puts in front of the user: `hint` is rendered as the suggested fix
+    and `detail` shows in the tooltip. A cached payload is a *success* payload
+    and carries neither, so both keys are dropped on the way back out — except
+    for a hint that is byte-for-byte one of this helper's own two literals,
+    which carries no attacker-chosen content by definition.
+    """
     try:
-        return json.loads(CACHE_PATH.read_text())
+        cached = json.loads(CACHE_PATH.read_text())
     except Exception:
         return None
+    if not isinstance(cached, dict):
+        return None
+    hint = cached.pop("hint", None)
+    cached.pop("detail", None)
+    if isinstance(hint, str) and hint in SAFE_HINTS:
+        cached["hint"] = hint
+    return cached
 
 def cmd_fetch() -> int:
     if not HAS_GARMINCONNECT:
@@ -370,6 +414,11 @@ def cmd_fetch() -> int:
     try:
         g = gc.Garmin()
         g.login(tokenstore=str(TOKENS_PATH))
+        # Inline, not just in the finally: login() may have rewritten the
+        # token file at the ambient umask, and everything below is network
+        # I/O that can take seconds. A SIGTERM in that window (logout, a
+        # bar restart) would otherwise leave a world-readable credential.
+        _secure_tokens()
         summary = g.get_user_summary(today) or {}
         sleep = g.get_sleep_data(today) or {}
         payload = build_payload(summary, sleep, now, _fetch_extras(g, today))
@@ -408,7 +457,13 @@ def _atomic_write(path: Path, obj, prefix: str) -> None:
     """
     tmp = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # The cache holds days of health data; v0.1 installs created this
+        # directory at 0755, so the mode is re-asserted, not just requested.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
         fd, tmp = tempfile.mkstemp(dir=str(path.parent),
                                    prefix=prefix, suffix=".json")
         with os.fdopen(fd, "w") as fh:
@@ -571,6 +626,7 @@ def cmd_login() -> int:
         g.login()
         _secure_config_dir()
         g.client.dump(str(TOKENS_PATH))
+        _secure_tokens()   # narrow the window before the finally block runs
     except Exception as e:
         # Rate limits and dead networks are not bad credentials. Reporting
         # them as auth-expired sends the user back into the login they just

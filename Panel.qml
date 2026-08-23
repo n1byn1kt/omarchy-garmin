@@ -263,9 +263,19 @@ Panel {
   // History is a list of daily snapshots the helper keeps in its cache. It can
   // be missing entirely (an older helper), empty (first run), or one entry
   // long — every consumer below has to survive all three.
-  readonly property var history:
-    root.payload && root.payload.history && root.payload.history.length !== undefined
-      ? root.payload.history : []
+  //
+  // Bounded on the way in, at the one place the payload enters the panel: the
+  // helper already trims to seven days, but the cache file is just a file on
+  // disk, and a hand-edited (or planted) 100k-entry list would otherwise be
+  // sorted and key-mapped on every repaint. The seven-newest cut happens in
+  // `historySorted` below, once the entries are actually in date order.
+  readonly property int historyDays: 7
+  readonly property int historyInputCap: 500
+  readonly property var history: {
+    var h = root.payload && root.payload.history ? root.payload.history : null
+    if (!h || h.length === undefined) return []
+    return h.length > root.historyInputCap ? h.slice(0, root.historyInputCap) : h
+  }
 
   readonly property var bbSeries: root.curveData && root.curveData.bodyBattery ? root.curveData.bodyBattery : null
   readonly property var stressSeries: root.curveData && root.curveData.stress ? root.curveData.stress : null
@@ -275,10 +285,18 @@ Panel {
   // and put a card with an empty plot on screen: the panel said "there is a
   // curve", the card disagreed, and the user got the rectangle without the
   // line. Both sides now count points that could actually be plotted.
+  //
+  // Bounded at both ends: the helper downsamples to 96 points per series, so
+  // for any real payload these caps are no-ops, but the series arrives from a
+  // cache file and a 200k-point array would sort-and-repaint the panel into a
+  // stall. Read at most 500 entries, keep at most the 96 newest.
+  readonly property int curveInputCap: 500
+  readonly property int curvePointCap: 96
   function cleanSeries(series) {
     var out = []
     if (!series || series.length === undefined) return out
-    for (var i = 0; i < series.length; i++) {
+    var n = Math.min(series.length, root.curveInputCap)
+    for (var i = 0; i < n; i++) {
       var p = series[i]
       if (!p || p.length === undefined || p.length < 2) continue
       var t = root.num(p[0])
@@ -287,7 +305,8 @@ Panel {
       out.push([t, v])
     }
     out.sort(function (a, b) { return a[0] - b[0] })
-    return out
+    return out.length > root.curvePointCap
+      ? out.slice(out.length - root.curvePointCap) : out
   }
 
   readonly property var bbPoints: root.cleanSeries(root.bbSeries)
@@ -327,16 +346,16 @@ Panel {
   // taking the last seven rows of a list that may be missing days.
   readonly property var historyByDate: {
     var map = {}
-    for (var i = 0; i < root.history.length; i++) {
-      var e = root.history[i]
-      if (!e) continue
-      var key = String(e.date || "")
-      if (key !== "") map[key] = e
+    for (var i = 0; i < root.historySorted.length; i++) {
+      var e = root.historySorted[i]
+      map[String(e.date)] = e
     }
     return map
   }
 
-  // Dated entries, oldest first — the shape the delta comparison wants.
+  // Dated entries, oldest first, seven at most — the shape the delta
+  // comparison wants. The cut is here rather than on the raw list because
+  // "newest" only means anything once the entries are in date order.
   readonly property var historySorted: {
     var out = []
     for (var i = 0; i < root.history.length; i++) {
@@ -344,7 +363,8 @@ Panel {
       if (e && String(e.date || "") !== "") out.push(e)
     }
     out.sort(function (a, b) { return String(a.date) < String(b.date) ? -1 : 1 })
-    return out
+    return out.length > root.historyDays
+      ? out.slice(out.length - root.historyDays) : out
   }
 
   readonly property string newestHistoryDate:
