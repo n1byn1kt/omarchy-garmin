@@ -117,6 +117,10 @@ Item {
   }
 
   function refresh() {
+    // The custom command is not part of the Garmin fetch, so it is kicked off
+    // before the `running` guard below — a fetch already in flight must not
+    // also swallow the refresh of a card that has nothing to do with it.
+    root.runCustom()
     if (fetchProcess.running) return
     _stdout = ""
     root.lastHint = ""
@@ -248,13 +252,138 @@ Item {
     }
   }
 
+  // ---- custom card plumbing
+  function runCustom() {
+    if (String(root.customCommand) === "") {
+      root.customCard = null
+      root.customError = ""
+      return
+    }
+    if (customProcess.running) return
+    _customOut = ""
+    // The user's own command line, so it gets a shell — that is what a command
+    // line is. Nothing here is interpolated into it.
+    customProcess.command = ["bash", "-c", String(root.customCommand)]
+    customProcess.running = true
+    customWatchdog.restart()
+  }
+
+  function customFail(detail) {
+    root.customCard = null
+    root.customError = String(detail || "")
+  }
+
+  // One short single-line string, or "". Everything on this path ends up in a
+  // panel card or a bar tooltip, and the command's output is not ours: control
+  // characters, newlines and unbounded length all get taken out here rather
+  // than at each of the four places that render it.
+  function customText(value, limit) {
+    if (typeof value === "number" && isFinite(value)) value = String(value)
+    if (typeof value !== "string") return ""
+    var s = value.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/^\s+|\s+$/g, "")
+    return s.length > limit ? s.substring(0, limit) : s
+  }
+
+  function applyCustom(text) {
+    var raw = String(text || "")
+    if (raw.length > root.customOutputCap) {
+      root.customFail("command printed more than 8 KB")
+      return
+    }
+    if (raw.replace(/^\s+|\s+$/g, "") === "") {
+      root.customFail("command printed nothing")
+      return
+    }
+    var obj
+    try {
+      obj = JSON.parse(raw)
+    } catch (e) {
+      root.customFail("command output was not JSON")
+      return
+    }
+    // Arrays are objects in JS, and an array's `.title` is undefined, so this
+    // would otherwise fall through to the missing-fields branch with a
+    // misleading message.
+    if (!obj || typeof obj !== "object" || obj.length !== undefined) {
+      root.customFail("command output was not a JSON object")
+      return
+    }
+    var title = root.customText(obj.title, 40)
+    var value = root.customText(obj.value, 24)
+    if (title === "" || value === "") {
+      root.customFail("output needs both title and value")
+      return
+    }
+    var tone = root.customText(obj.tone, 8)
+    if (tone !== "accent" && tone !== "urgent") tone = ""
+
+    // A meter is optional and only means anything with a positive max.
+    var percent = -1
+    var meter = obj.meter
+    if (meter && typeof meter === "object") {
+      var mv = Number(meter.value)
+      var mx = Number(meter.max)
+      if (isFinite(mv) && isFinite(mx) && mx > 0)
+        percent = Math.max(0, Math.min(100, mv / mx * 100))
+    }
+
+    root.customError = ""
+    root.customCard = {
+      "title": title,
+      "value": value,
+      "caption": root.customText(obj.caption, 60),
+      "tone": tone,
+      "meterPercent": percent
+    }
+  }
+
+  property string _customOut: ""
+
+  Process {
+    id: customProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: customStdout; waitForEnd: true; onStreamFinished: root._customOut = text }
+    onExited: function (exitCode, exitStatus) {
+      var timedOut = customWatchdog.tripped
+      customWatchdog.stop()
+      customWatchdog.tripped = false
+      if (timedOut) return
+      if (exitCode !== 0) {
+        root.customFail("command exited " + exitCode)
+        return
+      }
+      root.applyCustom(String(customStdout.text || root._customOut || ""))
+    }
+  }
+
+  Timer {
+    id: customWatchdog
+    property bool tripped: false
+    interval: 10000
+    repeat: false
+    onTriggered: {
+      if (!customProcess.running) return
+      customWatchdog.tripped = true
+      customProcess.running = false
+      root.customFail("command timed out after 10s")
+    }
+  }
+
+  onCustomCommandChanged: root.runCustom()
+
   // Take a result the primary instance already paid for. Deliberately silent —
   // emitting `refreshed()` here would bounce the payload straight back out
   // through the publisher and loop the bar.
-  function adopt(state, payload, lastError) {
+  // The custom card rides along: it is the primary that ran the command, and a
+  // second screen re-running it would be a second copy of somebody's script on
+  // every tick. `undefined` (an older peer) leaves this instance's card alone.
+  function adopt(state, payload, lastError, customCard, customError) {
     root.payload = payload
     root.state = String(state)
     root.lastError = String(lastError || "")
+    if (customCard !== undefined) root.customCard = customCard
+    if (customError !== undefined) root.customError = String(customError || "")
   }
 
   property string _stdout: ""

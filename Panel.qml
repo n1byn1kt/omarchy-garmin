@@ -795,6 +795,23 @@ Panel {
         "caption": meta.join(" · ")
       }
     }
+    case "custom": {
+      // Nothing here is trusted enough to be shown as-is except what the
+      // Service already cleaned: it capped the lengths, stripped control
+      // characters and whitelisted the tone. A card that failed any of that
+      // arrives as null and simply does not exist.
+      var c = root.customCard
+      return {
+        "kind": "metric",
+        "show": c !== null,
+        "icon": "󰆍",  // nf-md-console, U+F018D
+        "title": c ? String(c.title || "") : "",
+        "value": c ? String(c.value || "—") : "—",
+        "caption": c ? String(c.caption || "") : "",
+        "tone": c ? String(c.tone || "") : "",
+        "meterPercent": c && c.meterPercent !== undefined ? c.meterPercent : -1
+      }
+    }
     }
     return { "kind": "metric", "show": false }
   }

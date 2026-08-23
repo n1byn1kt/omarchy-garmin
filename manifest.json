@@ -18,7 +18,8 @@
       "barMetric": "bodyBattery",
       "showSteps": false,
       "stepsGoalFallback": 10000,
-      "panelMetrics": "curve,sleep,steps,readiness,rhr"
+      "panelMetrics": "curve,sleep,steps,readiness,rhr",
+      "customCommand": ""
     },
     "schema": [
       { "key": "pollMinutes", "type": "number", "label": "Refresh interval (minutes)" },

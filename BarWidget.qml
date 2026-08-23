@@ -76,6 +76,9 @@ BarWidget {
   Service {
     id: service
     pollMinutes: Number(root.setting("pollMinutes", 30)) || 30
+    // The user's own command line for the optional `custom` panel card. Empty
+    // (the default) means the card does not exist and nothing is ever run.
+    customCommand: String(root.setting("customCommand", ""))
     // One helper process per bar, not one per screen. Re-asked on every tick,
     // so losing a monitor promotes a surviving instance instead of stopping.
     canPoll: function () { return root.isPrimaryInstance() }
@@ -135,12 +138,13 @@ BarWidget {
     var items = root.peers()
     for (var i = 0; i < items.length; i++) {
       if (items[i] && items[i] !== root && typeof items[i].acceptPayload === "function")
-        items[i].acceptPayload(service.state, service.payload, service.lastError)
+        items[i].acceptPayload(service.state, service.payload, service.lastError,
+                               service.customCard, service.customError)
     }
   }
 
-  function acceptPayload(state, payload, lastError) {
-    service.adopt(state, payload, lastError)
+  function acceptPayload(state, payload, lastError, customCard, customError) {
+    service.adopt(state, payload, lastError, customCard, customError)
   }
 
   // ---- State → presentation
@@ -270,6 +274,9 @@ BarWidget {
     var lines = [root.metricLabel + (root.showNumbers ? " " + root.metricText : "")]
     lines.push(root.stateLabel)
     if (service.lastError !== "" && service.state !== "live") lines.push(service.lastError)
+    // Prefixed, because a failing custom command must never read like Garmin
+    // being down — it is the user's own script, and only its card is affected.
+    if (service.customError !== "") lines.push("custom card: " + service.customError)
     lines.push("left detail · middle refresh")
     return lines.join("\n")
   }
