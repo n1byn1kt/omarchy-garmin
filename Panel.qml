@@ -77,7 +77,7 @@ Panel {
   // a string too, so a same-named property would be a silent trap for anyone
   // who later adds a QML state to this panel.
   readonly property string svcState: root.service ? String(root.service.state) : "loading"
-  readonly property var payload: root.service ? root.service.data : null
+  readonly property var payload: root.service ? root.service.payload : null
   readonly property string lastError: root.service ? String(root.service.lastError || "") : ""
   readonly property bool busy: root.service ? root.service.busy === true : false
 

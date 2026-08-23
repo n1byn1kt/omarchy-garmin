@@ -78,12 +78,12 @@ BarWidget {
     var items = root.peers()
     for (var i = 0; i < items.length; i++) {
       if (items[i] && items[i] !== root && typeof items[i].acceptPayload === "function")
-        items[i].acceptPayload(service.state, service.data, service.lastError)
+        items[i].acceptPayload(service.state, service.payload, service.lastError)
     }
   }
 
-  function acceptPayload(state, data, lastError) {
-    service.adopt(state, data, lastError)
+  function acceptPayload(state, payload, lastError) {
+    service.adopt(state, payload, lastError)
   }
 
   // ---- State → presentation
@@ -92,7 +92,7 @@ BarWidget {
   // be rendered verbatim — widening the chip and shoving every widget to its
   // left along the bar. Anything that will not coerce reads as no data at all.
   readonly property var bb: {
-    var raw = service.data && service.data.bodyBattery ? service.data.bodyBattery.current : null
+    var raw = service.payload && service.payload.bodyBattery ? service.payload.bodyBattery.current : null
     if (raw === null || raw === undefined || raw === "") return null
     var n = Number(raw)
     return isFinite(n) ? Math.round(n) : null
@@ -100,7 +100,7 @@ BarWidget {
   readonly property bool hasBattery: bb !== null
 
   readonly property var stepCount: {
-    var raw = service.data && service.data.steps ? service.data.steps.count : null
+    var raw = service.payload && service.payload.steps ? service.payload.steps.count : null
     if (raw === null || raw === undefined || raw === "") return null
     var n = Number(raw)
     return isFinite(n) ? n : null
@@ -144,7 +144,7 @@ BarWidget {
     ? (root.bar && root.bar.accent !== undefined ? root.bar.accent : Color.accent)
     : (root.bar ? root.bar.urgent : Color.urgent)
 
-  readonly property string asOfText: service.data && service.data.asOf ? String(service.data.asOf) : ""
+  readonly property string asOfText: service.payload && service.payload.asOf ? String(service.payload.asOf) : ""
 
   readonly property string stateLabel: {
     switch (service.state) {

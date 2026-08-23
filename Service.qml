@@ -23,7 +23,14 @@ Item {
 
   // Last payload we were happy with, kept across later failures so an offline
   // blip keeps showing yesterday's numbers instead of blanking the chip.
-  property var data: null
+  //
+  // Named `payload`, not `data`: Item.data is QML's default property — the
+  // children list — and a `property var data` here does not replace it. It
+  // reads back as a non-null list object until something assigns to it, so
+  // `data !== null` was true on a brand-new shell and the very first offline
+  // failure classified itself as "stale, showing last known data" over a
+  // payload that did not exist.
+  property var payload: null
 
   property string lastError: ""
 
@@ -101,7 +108,7 @@ Item {
     }
 
     if (payload.ok === true) {
-      root.data = payload
+      root.payload = payload
       root.lastError = ""
       root.lastHint = ""
       root.state = payload.stale === true ? "stale" : "live"
@@ -119,15 +126,15 @@ Item {
   // forget this morning's Body Battery — it is a reason to mark it stale.
   function fail(code, detail) {
     root.lastError = detail
-    root.state = (code === "offline" && root.data !== null) ? "stale" : code
+    root.state = (code === "offline" && root.payload !== null) ? "stale" : code
     root.refreshed()
   }
 
   // Take a result the primary instance already paid for. Deliberately silent —
   // emitting `refreshed()` here would bounce the payload straight back out
   // through the publisher and loop the bar.
-  function adopt(state, data, lastError) {
-    root.data = data
+  function adopt(state, payload, lastError) {
+    root.payload = payload
     root.state = String(state)
     root.lastError = String(lastError || "")
   }
