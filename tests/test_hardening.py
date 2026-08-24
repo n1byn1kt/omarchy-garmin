@@ -287,6 +287,10 @@ def test_api_display_strings_are_clipped(home):
     act = mod.build_last_activity({"activityType": {"typeKey": long},
                                    "duration": 60, "distance": 1000})
     assert len(act["type"]) == mod.STR_CLIP
+    w = mod.build_weight({"dateWeightList": [
+        {"calendarDate": long, "weight": 88000, "timestampGMT": 1}]})
+    assert len(w["date"]) == mod.STR_CLIP
+    assert len(w["startDate"]) == mod.STR_CLIP
 
 
 # --- every QML Text sink renders plain text ----------------------------------

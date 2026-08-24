@@ -67,6 +67,7 @@ class FakeGarmin:
     readiness = None
     intensity = None
     last_activity = None
+    weigh_ins = None
     exc = {}          # method name -> exception to raise
 
     def __init__(self, *a, **kw):
@@ -123,6 +124,10 @@ class FakeGarmin:
         self._maybe_raise("get_last_activity")
         return FakeGarmin.last_activity
 
+    def get_weigh_ins(self, start, end):
+        self._maybe_raise("get_weigh_ins", start, end)
+        return FakeGarmin.weigh_ins
+
 
 class AuthError(Exception):
     pass
@@ -140,6 +145,7 @@ def fake_garmin(monkeypatch):
     FakeGarmin.readiness = None
     FakeGarmin.intensity = None
     FakeGarmin.last_activity = None
+    FakeGarmin.weigh_ins = None
     FakeGarmin.summary_by_date = {}
     FakeGarmin.sleep_by_date = {}
     FakeGarmin.daily_steps = None

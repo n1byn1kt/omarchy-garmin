@@ -260,6 +260,7 @@ Panel {
   readonly property var floorsInfo: root.payload && root.payload.floors ? root.payload.floors : null
   readonly property var caloriesInfo: root.payload && root.payload.calories ? root.payload.calories : null
   readonly property var activityInfo: root.payload && root.payload.lastActivity ? root.payload.lastActivity : null
+  readonly property var weightInfo: root.payload && root.payload.weight ? root.payload.weight : null
 
   // The custom card is not part of the Garmin payload at all — the Service
   // runs the user's command beside the fetch and hands over an already
@@ -287,6 +288,7 @@ Panel {
 
   readonly property var bbSeries: root.curveData && root.curveData.bodyBattery ? root.curveData.bodyBattery : null
   readonly property var stressSeries: root.curveData && root.curveData.stress ? root.curveData.stress : null
+  readonly property var weightSeries: root.weightInfo && root.weightInfo.series ? root.weightInfo.series : null
 
   // The same filter CurveCard.clean() applies before it draws. Counting raw
   // array entries here instead let a two-entry garbage series pass the gate
@@ -322,6 +324,55 @@ Panel {
   readonly property bool bbDrawn: root.bbPoints.length >= 2
   readonly property bool stressDrawn: root.stressPoints.length >= 2
   readonly property bool hasCurve: root.bbDrawn || root.stressDrawn
+
+  readonly property var weightPoints: {
+    var raw = root.cleanSeries(root.weightSeries)
+    var out = []
+    for (var i = 0; i < raw.length; i++)
+      if (raw[i][1] > 0) out.push(raw[i])
+    return out
+  }
+  readonly property bool hasWeight:
+    root.num(root.weightInfo ? root.weightInfo.current : null) !== null
+
+  // Change against the previous weigh-in, not against yesterday: weigh-ins
+  // skip days as a matter of course, so the two-day gap rule the other
+  // deltas use would hide the actual trend. Prefer the helper's `delta`
+  // (computed on the full series before downsampling); fall back to the
+  // two newest plotted points for an older cache that lacks the field.
+  // No colour on the arrow — weight going up is not an alarm for everyone.
+  readonly property var weightDelta: {
+    var diff = root.num(root.weightInfo ? root.weightInfo.delta : null)
+    if (diff === null) {
+      var s = root.weightPoints
+      if (s.length < 2) return { "glyph": "", "tone": "", "text": "" }
+      diff = Math.round((s[s.length - 1][1] - s[s.length - 2][1]) * 10) / 10
+    }
+    if (diff === 0) return { "glyph": "→", "tone": "", "text": "0.0 kg" }
+    var rose = diff > 0
+    var mag = Math.abs(diff).toFixed(1)
+    return {
+      "glyph": rose ? "↗" : "↘",
+      "tone": "",
+      "text": (rose ? "+" : "−") + mag + " kg"
+    }
+  }
+
+  readonly property string weightSpan: {
+    var start = root.fmtDay(root.weightInfo ? root.weightInfo.startDate : "")
+    var end = root.fmtDay(root.weightInfo ? root.weightInfo.date : "")
+    var span = (start !== "" && end !== "" && start !== end) ? start + "–" + end
+      : (end !== "" ? end : start)
+    var parts = []
+    if (span !== "") parts.push(span)
+    if (root.weightDelta.text !== "") parts.push(root.weightDelta.text)
+    return parts.join(" · ")
+  }
+
+  function fmtKg(n) {
+    var v = root.num(n)
+    return v === null ? "—" : v.toFixed(1) + " kg"
+  }
 
   // The last stress sample, for the days Garmin gives us a stress curve but
   // no Body Battery to head the card with.
@@ -547,7 +598,7 @@ Panel {
   // default set rather than leaving the body empty.
   readonly property var knownMetrics: [
     "curve", "battery", "sleep", "steps", "readiness",
-    "rhr", "hrv", "intensity", "floors", "calories", "activity", "custom"
+    "rhr", "hrv", "intensity", "floors", "calories", "weight", "activity", "custom"
   ]
   readonly property string defaultMetrics: "curve,sleep,steps,readiness,rhr"
 
@@ -558,7 +609,7 @@ Panel {
     "curve": "Day curve", "battery": "Body Battery", "sleep": "Sleep",
     "steps": "Steps", "readiness": "Training readiness", "rhr": "Resting HR",
     "hrv": "HRV", "intensity": "Intensity minutes", "floors": "Floors",
-    "calories": "Calories", "activity": "Last activity",
+    "calories": "Calories", "weight": "Weight", "activity": "Last activity",
     "custom": "Custom command"
   })
 
@@ -628,9 +679,9 @@ Panel {
   // enters the layout at all, so a hidden card leaves no hole and no gap.
   //
   // In dense mode the metric cards pair up two to a row. There is no scrolling
-  // in this panel by design, and eleven full-width cards run off the bottom of
-  // a 1080p screen — a second column buys back the height that the strips
-  // alone could not.
+  // in this panel by design, and a full deck of full-width cards runs off the
+  // bottom of a 1080p screen — a second column buys back the height that the
+  // strips alone could not.
   readonly property var cardRows: {
     var rows = []
     var pending = ""
@@ -639,8 +690,9 @@ Panel {
       // Only `kind` is needed here, and it does not depend on density.
       var card = root.cardFor(token, false)
 
-      // The curve is a chart, not a figure: it always gets the full width.
-      if (card.kind === "curve") {
+      // Charts always get the full width — pairing a plot with a figure
+      // would squeeze both past the point of being readable.
+      if (card.kind === "curve" || card.kind === "weight") {
         if (pending !== "") { rows.push([pending]); pending = "" }
         rows.push([token])
         continue
@@ -840,6 +892,22 @@ Panel {
         "title": "Calories",
         "value": total === null ? "—" : root.fmtSteps(total) + " kcal",
         "caption": active === null ? "" : root.fmtSteps(active) + " active"
+      }
+    }
+    case "weight": {
+      // Not a today-figure: weigh-ins skip days as a matter of course, so
+      // an empty morning must not hide a month of real data, and emptyToday
+      // must not keep an empty card around either.
+      var d4 = root.weightDelta
+      return {
+        "kind": "weight",
+        "show": root.hasWeight,
+        "icon": "󰔻",  // nf-md-weight, U+F053B
+        "title": "Weight",
+        "value": root.fmtKg(root.weightInfo ? root.weightInfo.current : null),
+        "delta": d4.glyph,
+        "deltaTone": d4.tone,
+        "caption": root.weightSpan
       }
     }
     case "activity": {
@@ -1352,6 +1420,7 @@ Panel {
 
                   readonly property var card: root.cardFor(cardSlot.modelData)
                   readonly property bool isCurve: cardSlot.card.kind === "curve"
+                  readonly property bool isWeight: cardSlot.card.kind === "weight"
 
                   // implicitHeight is what the layout measures; `height` is
                   // what it hands back, equalised across the row. Neither card
@@ -1360,7 +1429,9 @@ Panel {
                   Layout.preferredWidth: cardRow.cellWidth
                   Layout.fillWidth: true
                   Layout.fillHeight: true
-                  implicitHeight: cardSlot.isCurve ? curveCard.implicitHeight : metricCard.implicitHeight
+                  implicitHeight: cardSlot.isCurve ? curveCard.implicitHeight
+                    : cardSlot.isWeight ? weightCard.implicitHeight
+                    : metricCard.implicitHeight
 
                   CurveCard {
                     id: curveCard
@@ -1385,11 +1456,33 @@ Panel {
                     muted: root.showStale
                   }
 
+                  WeightCard {
+                    id: weightCard
+                    width: parent.width
+                    height: cardSlot.height
+                    visible: cardSlot.isWeight
+                    active: visible
+                    icon: cardSlot.card.icon || ""
+                    title: cardSlot.card.title || ""
+                    value: cardSlot.card.value || "—"
+                    tone: cardSlot.card.tone || ""
+                    caption: cardSlot.card.caption || ""
+                    delta: cardSlot.card.delta || ""
+                    deltaTone: cardSlot.card.deltaTone || ""
+                    series: root.weightSeries
+                    foreground: root.foreground
+                    accentColor: root.accentColor
+                    urgentColor: root.urgentColor
+                    dim: root.dim
+                    fontFamily: root.fontFamily
+                    muted: root.showStale
+                  }
+
                   MetricCard {
                     id: metricCard
                     width: parent.width
                     height: cardSlot.height
-                    visible: !cardSlot.isCurve
+                    visible: !cardSlot.isCurve && !cardSlot.isWeight
                     icon: cardSlot.card.icon || ""
                     title: cardSlot.card.title || ""
                     value: cardSlot.card.value || "—"

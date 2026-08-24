@@ -23,6 +23,7 @@ CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
 HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
 
 HISTORY_DAYS = 7
+WEIGHT_DAYS = 30    # weigh-ins are sparse; a week of history would be mostly empty
 CURVE_POINTS = 96   # the panel's Canvas is ~300px wide; more is wasted JSON
 
 # Local JSON files are read whole before parsing, so a grown (or planted)
@@ -346,6 +347,103 @@ def build_intensity(intensity):
     return {"weekly": weekly, "goal": goal}
 
 
+def _kg(v):
+    """Garmin weight in kilograms, 1 decimal, or None.
+
+    The weight-service stores grams. A value already in kg is well under
+    1000, which is also below any honest adult weigh-in in grams, so that
+    is the split. Zero and negative readings are dropped the same way
+    stress drops its 'watch off' sentinels.
+    """
+    n = _num(v)
+    if n is None or n <= 0:
+        return None
+    kg = n / 1000.0 if n >= 1000 else n
+    return round(kg, 1)
+
+
+def _weight_timestamp(row):
+    """Epoch milliseconds for one weigh-in, or None."""
+    ts = _num(row.get("timestampGMT"))
+    if ts is None:
+        ts = _num(row.get("date"))
+    if ts is not None:
+        ts = int(ts)
+        return ts if ts > 0 else None
+    cal = row.get("calendarDate")
+    if not isinstance(cal, str):
+        return None
+    try:
+        d = datetime.date.fromisoformat(cal[:10])
+    except ValueError:
+        return None
+    ts = int(datetime.datetime(d.year, d.month, d.day).timestamp() * 1000)
+    return ts if ts > 0 else None
+
+
+def _weight_rows(raw):
+    """Weigh-in dicts from whichever envelope Garmin sent.
+
+    get_weigh_ins (the ranged call) wraps days in dailyWeightSummaries with
+    allWeightMetrics; get_body_composition uses a flat dateWeightList. Both
+    shapes are accepted so a garminconnect rename of one endpoint still
+    yields a card from the other.
+    """
+    if not isinstance(raw, dict):
+        return []
+    rows = raw.get("dateWeightList")
+    if isinstance(rows, list):
+        return [r for r in rows if isinstance(r, dict)]
+    summaries = raw.get("dailyWeightSummaries")
+    if not isinstance(summaries, list):
+        return []
+    out = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        metrics = summary.get("allWeightMetrics")
+        if isinstance(metrics, list) and metrics:
+            out.extend(r for r in metrics if isinstance(r, dict))
+            continue
+        latest = summary.get("latestWeight")
+        if isinstance(latest, dict):
+            out.append(latest)
+    return out
+
+
+def build_weight(raw):
+    """{current, date, startDate, delta, series} — or None.
+
+    series is [[epochMs, kg], ...] oldest first, downsampled to the same
+    96-point cap the day curve uses. samplePk, sourceType and the rest of
+    the weigh-in dict stay out: they are identifiers, not a figure.
+    """
+    points = []
+    seen = set()
+    for row in _weight_rows(raw):
+        kg, ts = _kg(row.get("weight")), _weight_timestamp(row)
+        if kg is None or ts is None:
+            continue
+        key = (ts, kg)
+        if key in seen:
+            continue
+        seen.add(key)
+        cal = row.get("calendarDate")
+        date = _clip(cal.split("T")[0].split(" ")[0]) if isinstance(cal, str) else None
+        points.append((ts, kg, date))
+    if not points:
+        return None
+    points.sort(key=lambda p: p[0])
+    last, prev = points[-1], points[-2] if len(points) > 1 else None
+    return {
+        "current": last[1],
+        "date": last[2],
+        "startDate": points[0][2],
+        "delta": None if prev is None else round(last[1] - prev[1], 1),
+        "series": _downsample([[p[0], p[1]] for p in points]),
+    }
+
+
 def build_last_activity(act):
     """{type, durationMin, distanceKm, date} — and nothing else.
 
@@ -412,13 +510,14 @@ def build_payload(summary, sleep, as_of, extras=None):
     payload["floors"] = build_floors(summary)
     payload["calories"] = build_calories(summary)
     payload["lastActivity"] = build_last_activity(extras.get("lastActivity"))
+    payload["weight"] = build_weight(extras.get("weighIns"))
     return payload
 
 
 def _safe(fn):
     """Run one secondary API call; a failure nulls its key, nothing more.
 
-    The extended metrics come from six separate endpoints, any of which can
+    The extended metrics come from seven separate endpoints, any of which can
     404 for a day with no data, or 500, or vanish in the next garminconnect
     release. One of them failing must never cost the user their body battery
     chip, so each is isolated here rather than sharing fetch's try block.
@@ -430,6 +529,8 @@ def _safe(fn):
 
 
 def _fetch_extras(g, today):
+    weight_start = (datetime.date.fromisoformat(today)
+                    - datetime.timedelta(days=WEIGHT_DAYS - 1)).isoformat()
     return {
         "bodyBattery": _safe(lambda: g.get_body_battery(today)),
         "stress": _safe(lambda: g.get_stress_data(today)),
@@ -437,6 +538,7 @@ def _fetch_extras(g, today):
         "readiness": _safe(lambda: g.get_training_readiness(today)),
         "intensity": _safe(lambda: g.get_intensity_minutes_data(today)),
         "lastActivity": _safe(lambda: g.get_last_activity()),
+        "weighIns": _safe(lambda: g.get_weigh_ins(weight_start, today)),
     }
 
 def _secure_tokens() -> None:
@@ -723,7 +825,8 @@ def _update_history(payload, today, g=None):
 # with knownMetrics in Panel.qml — a token this helper drops is a card the
 # panel can never be asked for again.
 PANEL_METRICS = ("curve", "battery", "sleep", "steps", "readiness", "rhr",
-                 "hrv", "intensity", "floors", "calories", "activity", "custom")
+                 "hrv", "intensity", "floors", "calories", "weight",
+                 "activity", "custom")
 BAR_METRICS = ("bodyBattery", "steps", "sleep", "readiness")
 
 # A pref value is a short token list typed by a person, not a document. The cap

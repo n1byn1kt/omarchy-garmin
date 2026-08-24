@@ -97,6 +97,13 @@ def test_prefs_set_drops_unknown_tokens_and_duplicates(home, capsys):
     assert out["prefs"]["panelMetrics"] == ["steps", "custom"]
 
 
+def test_prefs_set_accepts_the_weight_token(home, capsys):
+    mod = load_helper()
+    rc, out = run(mod, ["prefs", "set", "panelMetrics", "curve,weight,rhr"], capsys)
+    assert out["ok"] is True
+    assert out["prefs"]["panelMetrics"] == ["curve", "weight", "rhr"]
+
+
 def test_prefs_set_rejects_an_invalid_bar_metric(home, capsys):
     mod = load_helper()
     rc, out = run(mod, ["prefs", "set", "barMetric", "hrv"], capsys)

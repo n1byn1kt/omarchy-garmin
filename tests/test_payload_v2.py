@@ -14,6 +14,7 @@ def _all_endpoints(fake):
     fake.readiness = fixtures.READINESS
     fake.intensity = fixtures.INTENSITY
     fake.last_activity = fixtures.LAST_ACTIVITY
+    fake.weigh_ins = fixtures.WEIGH_INS
 
 
 def _fetch(mod, capsys):
@@ -64,7 +65,7 @@ def test_absent_metrics_are_null_not_missing(home, fake_garmin, capsys):
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True
     for key in ("curve", "hrvStatus", "readiness", "intensityMinutes",
-                "floors", "calories", "lastActivity"):
+                "floors", "calories", "lastActivity", "weight"):
         assert key in out and out[key] is None, key
     # The v0.1 keys the shipped QML reads are untouched.
     assert out["bodyBattery"] == {"current": 61, "high": 90, "low": 30}
@@ -88,7 +89,7 @@ def test_every_secondary_endpoint_failing_still_yields_ok_fetch(home, fake_garmi
     fake_garmin.exc = {name: RuntimeError("boom") for name in (
         "get_body_battery", "get_stress_data", "get_hrv_data",
         "get_training_readiness", "get_intensity_minutes_data",
-        "get_last_activity")}
+        "get_last_activity", "get_weigh_ins")}
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True and out["stale"] is False
     assert out["restingHr"] == 52
@@ -229,3 +230,134 @@ def test_history_survives_a_failed_fetch(home, fake_garmin, capsys):
     out = _fetch(load_helper(), capsys)
     assert out["stale"] is True
     assert mod.HISTORY_PATH.read_text() == before
+
+
+# --- weight timeline ---------------------------------------------------------
+
+def test_weight_from_weigh_ins_summaries(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    out = _fetch(load_helper(), capsys)
+    w = out["weight"]
+    assert w["current"] == 88.2
+    assert w["date"] == "2026-08-24"
+    assert w["startDate"] == "2026-08-08"
+    assert w["delta"] == -0.7
+    series = w["series"]
+    assert [p[0] for p in series] == sorted(p[0] for p in series)
+    assert series[0] == [1786140429008, 89.5]
+    assert series[-1] == [1787567402007, 88.2]
+    # Both samples on the 8th survive; this is a timeline of weigh-ins,
+    # not a one-per-day rollup.
+    assert len(series) == 8
+
+
+def test_weight_carries_no_ids_or_owner_names(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    out = _fetch(load_helper(), capsys)
+    assert set(out["weight"]) == {
+        "current", "date", "startDate", "delta", "series"}
+    blob = json.dumps(out)
+    assert "samplePk" not in blob
+    assert "ownerFullName" not in blob
+    assert "Someone" not in blob
+    assert "99000" not in blob
+
+
+def test_weight_falls_back_to_latest_weight_when_metrics_are_empty(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = {
+        "dailyWeightSummaries": [{
+            "summaryDate": "2026-08-24",
+            "allWeightMetrics": [],
+            "latestWeight": fixtures._weigh("2026-08-24", 88199.0, 1787567402007),
+        }]}
+    out = _fetch(load_helper(), capsys)
+    assert out["weight"]["current"] == 88.2
+    assert out["weight"]["series"] == [[1787567402007, 88.2]]
+
+
+def test_weight_non_list_summaries_null_the_card_not_the_fetch(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = {"dailyWeightSummaries": 3}
+    out = _fetch(load_helper(), capsys)
+    assert out["ok"] is True and out["weight"] is None
+
+
+def test_weight_accepts_the_date_weight_list_envelope(home, fake_garmin, capsys):
+    """get_body_composition uses a flat dateWeightList; both shapes parse."""
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = fixtures.WEIGH_INS_DATE_LIST
+    out = _fetch(load_helper(), capsys)
+    w = out["weight"]
+    assert w["current"] == 88.2 and w["date"] == "2026-08-24"
+    # dateWeightList is one row per day, so the extra morning sample is gone.
+    assert len(w["series"]) == 7
+
+
+def test_weight_already_in_kg_is_not_divided_again(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = {
+        "dateWeightList": [
+            {"calendarDate": "2026-08-01", "weight": 88.2,
+             "timestampGMT": 1786140429008},
+            {"calendarDate": "2026-08-24", "weight": 87.4,
+             "timestampGMT": 1787567402007},
+        ]}
+    out = _fetch(load_helper(), capsys)
+    assert out["weight"]["current"] == 87.4
+    assert out["weight"]["delta"] == -0.8
+
+
+def test_weight_drops_non_positive_timestamps(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = {
+        "dateWeightList": [
+            {"weight": 88000, "timestampGMT": 0},
+            {"weight": 88000, "timestampGMT": -1},
+            {"calendarDate": "2026-08-24", "weight": 88199.0,
+             "timestampGMT": 1787567402007},
+        ]}
+    out = _fetch(load_helper(), capsys)
+    assert out["weight"]["series"] == [[1787567402007, 88.2]]
+
+
+def test_weight_drops_zero_negative_and_duplicate_samples(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    ts = 1787567402007
+    fake_garmin.weigh_ins = {
+        "dateWeightList": [
+            {"calendarDate": "2026-08-20", "weight": 0, "timestampGMT": ts - 86400000},
+            {"calendarDate": "2026-08-21", "weight": -100, "timestampGMT": ts - 1000},
+            {"calendarDate": "2026-08-24", "weight": 88199.0, "timestampGMT": ts},
+            {"calendarDate": "2026-08-24", "weight": 88199.0, "timestampGMT": ts},
+        ]}
+    out = _fetch(load_helper(), capsys)
+    assert out["weight"]["series"] == [[ts, 88.2]]
+    assert out["weight"]["delta"] is None
+
+
+def test_weight_malformed_payload_nulls_the_card(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = {"dailyWeightSummaries": "nope"}
+    out = _fetch(load_helper(), capsys)
+    assert out["ok"] is True and out["weight"] is None
+
+
+def test_weight_endpoint_failure_nulls_only_weight(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.exc = {"get_weigh_ins": RuntimeError("500 for user@example.com")}
+    out = _fetch(load_helper(), capsys)
+    assert out["ok"] is True and out["weight"] is None
+    assert out["readiness"] == {"score": 54, "level": "MODERATE"}
+    assert "user@example.com" not in json.dumps(out)
+
+
+def test_weight_fetch_asks_for_thirty_days(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    _fetch(load_helper(), capsys)
+    weigh_calls = [c for c in fake_garmin.calls if c[0] == "get_weigh_ins"]
+    assert len(weigh_calls) == 1
+    start, end = weigh_calls[0][1]
+    today = load_helper().datetime.date.today()
+    assert end == today.isoformat()
+    assert start == (today - load_helper().datetime.timedelta(days=29)).isoformat()

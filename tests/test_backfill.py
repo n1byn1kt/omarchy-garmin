@@ -58,7 +58,7 @@ def test_backfill_uses_one_ranged_steps_call_and_stays_under_budget(home, fake_g
     ranged = [c for c in fake_garmin.calls if c[0] == "get_daily_steps"]
     assert len(ranged) == 1
     assert ranged[0][1] == (_day(6), _day(1))
-    assert len(fake_garmin.calls) <= 21   # 8 poll + 1 ranged + 6 days x 2
+    assert len(fake_garmin.calls) <= 22   # 9 poll + 1 ranged + 6 days x 2
 
 
 def test_payload_history_is_still_a_plain_list_of_day_entries(home, fake_garmin, capsys):
@@ -84,13 +84,13 @@ def test_backfill_runs_at_most_once(home, fake_garmin, capsys):
     assert not [c for c in fake_garmin.calls if c[0] == "get_daily_steps"]
 
 
-def test_normal_poll_after_backfill_makes_exactly_eight_api_calls(home, fake_garmin, capsys):
+def test_normal_poll_after_backfill_makes_exactly_nine_api_calls(home, fake_garmin, capsys):
     _all_endpoints(fake_garmin)
     _stock_past_days(fake_garmin)
     _fetch(load_helper(), capsys)
     fake_garmin.calls = []
     _fetch(load_helper(), capsys)
-    assert len(fake_garmin.calls) == 8
+    assert len(fake_garmin.calls) == 9
 
 
 def test_old_flat_list_history_is_migrated_and_backfilled(home, fake_garmin, capsys):

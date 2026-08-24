@@ -28,10 +28,11 @@ and the timestamp.
 the day's Body Battery and stress curve, sleep score and duration, steps against
 your Garmin step goal, training readiness, resting HR, and more (full list under
 [Settings](#settings)). A seven-day strip is drawn on the battery, sleep and
-steps cards; a `↗ ↘ →` delta is drawn on sleep, steps and resting HR. The rest
-of the cards (curve, readiness, HRV, intensity, floors, calories, activity,
-custom) show a figure only. Every card gets a footer timestamp and a Refresh
-button.
+steps cards; a `↗ ↘ →` delta is drawn on sleep, steps, resting HR and weight.
+The weight card is a 30-day timeline of weigh-ins rather than a seven-day
+strip, because those skip days as a matter of course. The rest of the cards
+(readiness, HRV, intensity, floors, calories, activity, custom) show a
+figure only. Every card gets a footer timestamp and a Refresh button.
 The pencil in the header rearranges the whole deck without leaving the panel —
 see [Rearranging the cards](#rearranging-the-cards-from-the-panel).
 
@@ -39,9 +40,12 @@ Deltas compare the **two newest cached entries that actually have that
 field**, which is normally today against yesterday — but skips a day the
 field is missing from rather than comparing against it. No arrow is shown if
 those two entries are more than two days apart; an arrow against a reading
-from last week is not a trend. Deltas and strips are drawn from cached
-history, not from the live fetch, so a stale payload still shows you a real
-comparison — just an older one; the footer's `· stale` is what tells you so.
+from last week is not a trend. Weight is the exception: weigh-ins are sparse
+by nature, so its arrow is the previous sample in the 30-day series, however
+many days sit between them. Deltas and strips (and the weight series) are
+drawn from cache, not from a second live fetch, so a stale payload still
+shows you a real comparison — just an older one; the footer's `· stale` is
+what tells you so.
 Before your watch has synced for the day, today's own figures show `—`, while
 the seven-day strips keep drawing from cache as usual.
 
@@ -151,6 +155,15 @@ than the poll interval.
 
 ---
 
+## What's new in 0.4.0
+
+- **Weight timeline.** A `weight` card plots the last 30 days of Garmin
+  weigh-ins as a date-axis graph (auto-scaled, one dot per sample) with the
+  latest reading and a delta against the previous weigh-in. Turn it on from
+  the panel's edit mode — it is not in the default deck, so existing layouts
+  stay as they are. One extra endpoint (`get_weigh_ins`); a failure nulls
+  this card and nothing else.
+
 ## What's new in 0.3.1
 
 Fixes: `customCommand` runs via argv rather than a shell string, the custom
@@ -220,8 +233,9 @@ Verified against `garminconnect` **0.3.11**. Newer releases normally work — th
 calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
 `get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
 `get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
-`get_last_activity()`, `get_daily_steps()` — the ranged call the one-time
-history backfill uses) have been stable for a long time, and each one is asked
+`get_last_activity()`, `get_weigh_ins()`, `get_daily_steps()` — the ranged
+call the one-time history backfill uses) have been stable for a long time,
+and each one is asked
 for separately so a renamed endpoint costs you a card rather than the widget —
 but 0.3.11 is the version the widget was tested on.
 
@@ -288,7 +302,7 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 | `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. the bolt glyph and `61` followed by `8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
 | `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
-| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
+| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `weight` (30-day weigh-in timeline), `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `customCommand` | string | `""` (off) | A command line whose stdout is one JSON object `{title, value, caption, meter:{value,max}, tone}`, rendered as the `custom` card. Empty means the card does not exist and nothing is ever run. See [Your own card](#your-own-card) for the contract and the safety rails. |
 
 On a multi-monitor setup the widget appears on every bar, and it is designed so
@@ -389,7 +403,7 @@ omarchy plugin validate .            # manifest schema check
 
 The plugin is `manifest.json`, `Service.qml` (poller and state machine),
 `BarWidget.qml` (the chip), `Panel.qml` (the detail panel) with its
-`MetricCard.qml` / `Meter.qml` / `CurveCard.qml` pieces, and the Python helper
+`MetricCard.qml` / `Meter.qml` / `CurveCard.qml` / `WeightCard.qml` pieces, and the Python helper
 in `bin/garmin-widget`. The helper's contract is that every
 subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.

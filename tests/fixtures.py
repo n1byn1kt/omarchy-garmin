@@ -119,3 +119,57 @@ LAST_ACTIVITY = {
     "distance": 12000.0,
     "duration": 6400.0,
 }
+
+# --- get_weigh_ins(start, end) -----------------------------------------------
+# Ranged call. Each day is a dailyWeightSummary; allWeightMetrics holds every
+# sample that day (two on the 8th). Weight is grams. samplePk / owner names
+# must not reach the payload.
+def _weigh(cal, grams, ts, delta=None):
+    return {
+        "samplePk": 99_000_000_000 + int(ts % 10_000_000),
+        "date": ts + 7_200_000,
+        "calendarDate": cal,
+        "weight": grams,
+        "bmi": None,
+        "bodyFat": None,
+        "sourceType": "MANUAL",
+        "timestampGMT": ts,
+        "weightDelta": delta,
+        "ownerFullName": "Someone",
+    }
+
+
+def _day(cal, rows):
+    grams = [r["weight"] for r in rows]
+    return {
+        "summaryDate": cal,
+        "numOfWeightEntries": len(rows),
+        "minWeight": min(grams),
+        "maxWeight": max(grams),
+        "latestWeight": rows[-1],
+        "allWeightMetrics": rows,
+    }
+
+
+WEIGH_INS = {
+    "dailyWeightSummaries": [
+        _day("2026-08-24", [_weigh("2026-08-24", 88199.0, 1787567402007, -700)]),
+        _day("2026-08-16", [_weigh("2026-08-16", 88900.0, 1786876404009, -500)]),
+        _day("2026-08-15", [_weigh("2026-08-15", 89400.0, 1786778252003, 500)]),
+        _day("2026-08-14", [_weigh("2026-08-14", 88900.0, 1786706774003, -700)]),
+        _day("2026-08-10", [_weigh("2026-08-10", 89599.0, 1786344134003, -500)]),
+        _day("2026-08-09", [_weigh("2026-08-09", 90099.0, 1786285535223, 0)]),
+        _day("2026-08-08", [
+            _weigh("2026-08-08", 89500.0, 1786140429008, None),
+            _weigh("2026-08-08", 89199.0, 1786171294004, -301),
+        ]),
+    ],
+    "totalAverage": {"weight": 89185.14},
+}
+
+# get_body_composition envelope: one row per day, already in grams.
+WEIGH_INS_DATE_LIST = {
+    "startDate": "2026-07-25",
+    "endDate": "2026-08-24",
+    "dateWeightList": [s["latestWeight"] for s in WEIGH_INS["dailyWeightSummaries"]],
+}
