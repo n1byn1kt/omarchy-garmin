@@ -55,7 +55,24 @@ Rectangle {
 
   readonly property color fillColor: card.muted ? card.dim : card.accentColor
 
-  color: Util.alpha(card.foreground, 0.075)
+  // Click opens the week view; the panel decides which cards have one.
+  property bool clickable: false
+  signal clicked()
+
+  color: Util.alpha(card.foreground, card.clickable && cardHover.hovered ? 0.12 : 0.075)
+  Behavior on color { ColorAnimation { duration: 90 } }
+
+  HoverHandler {
+    id: cardHover
+    enabled: card.clickable
+    cursorShape: Qt.PointingHandCursor
+  }
+
+  TapHandler {
+    enabled: card.clickable
+    acceptedButtons: Qt.LeftButton
+    onTapped: card.clicked()
+  }
   radius: Style.cornerRadius
   implicitHeight: content.implicitHeight + Style.space(10) * 2
 

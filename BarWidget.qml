@@ -316,6 +316,14 @@ BarWidget {
     if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
   }
 
+  // Open the panel straight onto one metric's week view — what a keybind
+  // for "show me my sleep" wants. Unknown tokens just open the panel.
+  function openDetail(token) {
+    if (!panelLoader.item) return
+    root.open()
+    if (panelLoader.item.openDetail) panelLoader.item.openDetail(token)
+  }
+
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
 
   function closeForPopoutSwitch() {
@@ -387,6 +395,7 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function detail(token: string): void { root.openDetail(token) }
   }
 
   WidgetButton {

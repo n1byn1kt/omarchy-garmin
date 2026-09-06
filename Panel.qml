@@ -944,6 +944,256 @@ Panel {
   // validates and owns the file. QML never touches disk.
   property bool editMode: false
 
+  // ---- Detail view: one metric, the last seven days
+  //
+  // Replaces the card deck the way edit mode does, rather than expanding a
+  // card in place: with eleven cards the deck already fills the screen, and
+  // a full-width page has room for a chart that is actually readable.
+  property string detailToken: ""
+  readonly property bool detailMode: root.detailToken !== ""
+  readonly property var expandableTokens: ["battery", "sleep", "steps", "readiness", "rhr", "hrv", "calories", "curve"]
+  function expandable(token) { return root.expandableTokens.indexOf(String(token)) !== -1 }
+
+  function openDetail(token) {
+    token = String(token || "")
+    if (!root.expandable(token)) return
+    // The curve slot draws the battery card when there is no curve; the
+    // detail follows what is on screen, not the token.
+    if (token === "curve" && !root.hasCurve) token = "battery"
+    root.detailToken = token
+  }
+  function closeDetail() { root.detailToken = "" }
+  // A reopened panel starts on the deck, not on whatever was last inspected.
+  onOpenedChanged: if (!root.opened) root.detailToken = ""
+
+  // Seven calendar days ending on the newest history entry, each with its
+  // history row (or null). The same walk stripFor does, kept separate so the
+  // detail page can carry richer per-day objects than a strip slot.
+  function weekDays() {
+    if (root.newestHistoryDate === "") return []
+    var end = root.parseDay(root.newestHistoryDate)
+    if (!end) return []
+    var out = []
+    for (var back = 6; back >= 0; back--) {
+      var day = new Date(end.getFullYear(), end.getMonth(), end.getDate() - back)
+      var key = root.dayKey(day)
+      out.push({ "date": key, "label": root.weekdayNames[day.getDay()],
+                 "dayLabel": root.fmtDay(key), "entry": root.historyByDate[key] || null })
+    }
+    return out
+  }
+
+  // `build(entry)` returns { value, lo?, parts?, goal?, valueText, tipText? }
+  // or null for a day with nothing to show.
+  function weekSlots(build) {
+    var days = root.weekDays()
+    var out = []
+    for (var i = 0; i < days.length; i++) {
+      var d = days[i]
+      var s = d.entry ? build(d.entry) : null
+      var present = !!s && root.num(s.value) !== null
+      var when = d.label + " " + d.dayLabel
+      out.push({
+        "label": d.label, "dayLabel": d.dayLabel, "present": present,
+        "value": present ? s.value : null,
+        "lo": present && s.lo !== undefined ? s.lo : null,
+        "parts": present && s.parts ? s.parts : [],
+        "goal": present && s.goal !== undefined ? s.goal : null,
+        "valueText": present ? String(s.valueText) : "",
+        "tip": present ? when + " · " + String(s.tipText || s.valueText) : when + " · no data"
+      })
+    }
+    return out
+  }
+
+  function weekStats(slots, pick) {
+    var vals = []
+    for (var i = 0; i < slots.length; i++) {
+      if (!slots[i].present) continue
+      var v = root.num(pick ? pick(slots[i]) : slots[i].value)
+      if (v !== null) vals.push(v)
+    }
+    if (vals.length === 0) return null
+    var sum = 0, min = Infinity, max = -Infinity
+    for (var j = 0; j < vals.length; j++) {
+      sum += vals[j]
+      if (vals[j] < min) min = vals[j]
+      if (vals[j] > max) max = vals[j]
+    }
+    return { "n": vals.length, "sum": sum, "min": min, "max": max, "avg": sum / vals.length }
+  }
+
+  function minutesOr0(v) { var n = root.num(v); return n === null ? 0 : n }
+
+  readonly property var detail: root.detailFor(root.detailToken)
+
+  function detailFor(token) {
+    // `headline` overrides the card's own figure at the top of the page;
+    // null means "show what the card shows".
+    var empty = { "title": "", "icon": "", "variant": "bars", "days": [], "fixedMax": 0,
+                  "axisMin": 0, "band": null, "partColors": [], "legend": [], "summary": "",
+                  "headline": null }
+    var fg = root.foreground, ac = root.accentColor
+    var slots, st
+    switch (token) {
+    case "battery": {
+      slots = root.weekSlots(function (e) {
+        var hi = root.num(e.bbHigh), lo = root.num(e.bbLow)
+        if (hi === null) return null
+        var tip = root.fmtNumber(hi) + " high" + (lo === null ? "" : " · " + root.fmtNumber(lo) + " low")
+        var c = root.num(e.bbCharged), dr = root.num(e.bbDrained)
+        if (c !== null || dr !== null) tip += " · +" + root.fmtNumber(c === null ? 0 : c) + " / −" + root.fmtNumber(dr === null ? 0 : dr)
+        return { "value": hi, "lo": lo === null ? 0 : lo, "valueText": root.fmtNumber(hi), "tipText": tip }
+      })
+      st = root.weekStats(slots)
+      var lo = root.weekStats(slots, function (s) { return s.lo })
+      return Object.assign({}, empty, {
+        "title": "Body Battery", "icon": "󱐋", "variant": "range", "days": slots, "fixedMax": 100,
+        "summary": st ? "avg high " + root.fmtNumber(Math.round(st.avg)) + (lo ? " · avg low " + root.fmtNumber(Math.round(lo.avg)) : "") : ""
+      })
+    }
+    case "sleep": {
+      slots = root.weekSlots(function (e) {
+        var total = root.num(e.sleepMin), score = root.num(e.sleepScore)
+        if (total === null && score === null) return null
+        var stages = [root.num(e.deepMin), root.num(e.lightMin), root.num(e.remMin), root.num(e.awakeMin)]
+        var hasStages = stages.some(function (v) { return v !== null })
+        var parts = hasStages ? stages.map(function (v) { return v === null ? 0 : v }) : [total === null ? 0 : total]
+        var height = hasStages ? parts.reduce(function (a, b) { return a + b }, 0) : (total === null ? 0 : total)
+        var tip = (score === null ? "" : "score " + root.fmtNumber(score) + " · ") + root.fmtDuration(total === null ? height : total)
+        if (hasStages) tip += " · deep " + root.fmtDuration(parts[0]) + " · light " + root.fmtDuration(parts[1])
+          + " · REM " + root.fmtDuration(parts[2]) + " · awake " + root.fmtDuration(parts[3])
+        return { "value": height, "parts": parts,
+                 "valueText": score === null ? root.fmtDuration(total) : root.fmtNumber(score), "tipText": tip }
+      })
+      st = root.weekStats(slots)
+      var sc = root.weekStats(slots, function (s) { return /^\d+$/.test(s.valueText) ? Number(s.valueText) : null })
+      return Object.assign({}, empty, {
+        "title": "Sleep", "icon": "󰒲", "variant": "stacked", "days": slots,
+        "partColors": [ac, Util.alpha(ac, 0.55), Util.alpha(ac, 0.3), Util.alpha(fg, 0.25)],
+        "legend": [{ "label": "Deep", "color": ac }, { "label": "Light", "color": Util.alpha(ac, 0.55) },
+                   { "label": "REM", "color": Util.alpha(ac, 0.3) }, { "label": "Awake", "color": Util.alpha(fg, 0.25) }],
+        "summary": st ? "avg " + root.fmtDuration(Math.round(st.avg)) + (sc ? " · avg score " + root.fmtNumber(Math.round(sc.avg)) : "") : ""
+      })
+    }
+    case "steps": {
+      slots = root.weekSlots(function (e) {
+        var n = root.num(e.steps)
+        if (n === null) return null
+        var g = root.num(e.stepGoal)
+        return { "value": n, "goal": g, "valueText": root.fmtSteps(n),
+                 "tipText": root.fmtSteps(n) + (g === null ? "" : " · goal " + root.fmtSteps(g)) }
+      })
+      st = root.weekStats(slots)
+      var met = 0
+      for (var i = 0; i < slots.length; i++)
+        if (slots[i].present && slots[i].goal !== null && slots[i].value >= slots[i].goal) met++
+      return Object.assign({}, empty, {
+        "title": "Steps", "icon": "󰖃", "variant": "bars", "days": slots,
+        "summary": st ? "avg " + root.fmtSteps(Math.round(st.avg)) + " · total " + root.fmtSteps(st.sum) + " · goal met " + met + "/" + st.n : ""
+      })
+    }
+    case "readiness": {
+      slots = root.weekSlots(function (e) {
+        var n = root.num(e.readiness)
+        return n === null ? null : { "value": n, "valueText": root.fmtNumber(n) }
+      })
+      st = root.weekStats(slots)
+      return Object.assign({}, empty, {
+        "title": "Training readiness", "icon": "󰓅", "variant": "bars", "days": slots, "fixedMax": 100,
+        "summary": st ? "min " + root.fmtNumber(st.min) + " · avg " + root.fmtNumber(Math.round(st.avg)) + " · max " + root.fmtNumber(st.max) : ""
+      })
+    }
+    case "rhr": {
+      slots = root.weekSlots(function (e) {
+        var n = root.num(e.restingHr)
+        return n === null ? null : { "value": n, "valueText": root.fmtNumber(n), "tipText": root.fmtNumber(n) + " bpm" }
+      })
+      st = root.weekStats(slots)
+      return Object.assign({}, empty, {
+        "title": "Resting HR", "icon": "󰗶", "variant": "bars", "days": slots,
+        // A resting heart rate lives in a ten-beat window; from zero every
+        // bar is the same height. The axis starts a few beats under the
+        // week's low so the shape is visible, and the labels carry the truth.
+        "axisMin": st ? Math.max(0, st.min - 6) : 0,
+        "summary": st ? "min " + root.fmtNumber(st.min) + " · avg " + root.fmtNumber(Math.round(st.avg)) + " · max " + root.fmtNumber(st.max) + " bpm" : ""
+      })
+    }
+    case "hrv": {
+      var band = null
+      var days = root.weekDays()
+      for (var k = days.length - 1; k >= 0; k--) {
+        var en = days[k].entry
+        if (en && root.num(en.hrvBalLow) !== null && root.num(en.hrvBalHigh) !== null) {
+          band = { "lo": root.num(en.hrvBalLow), "hi": root.num(en.hrvBalHigh) }
+          break
+        }
+      }
+      slots = root.weekSlots(function (e) {
+        var n = root.num(e.hrvNight)
+        if (n === null) return null
+        var w = root.num(e.hrvWeekly)
+        return { "value": n, "valueText": root.fmtNumber(n),
+                 "tipText": root.fmtNumber(n) + " ms" + (w === null ? "" : " · weekly avg " + root.fmtNumber(w)) }
+      })
+      st = root.weekStats(slots)
+      var floor = st ? st.min : 0
+      if (band && band.lo < floor) floor = band.lo
+      return Object.assign({}, empty, {
+        "title": "HRV", "icon": "󰐰", "variant": "bars", "days": slots, "band": band,
+        "axisMin": Math.max(0, floor - 12),
+        "summary": (st ? "avg " + root.fmtNumber(Math.round(st.avg)) + " ms" : "")
+          + (band ? (st ? " · " : "") + "balanced " + root.fmtNumber(band.lo) + "–" + root.fmtNumber(band.hi) : "")
+      })
+    }
+    case "calories": {
+      slots = root.weekSlots(function (e) {
+        var a = root.num(e.calActive), r = root.num(e.calResting)
+        if (a === null && r === null) return null
+        var parts = [r === null ? 0 : r, a === null ? 0 : a]
+        var total = parts[0] + parts[1]
+        return { "value": total, "parts": parts, "valueText": root.fmtSteps(total),
+                 "tipText": root.fmtSteps(total) + " kcal" + (a === null ? "" : " · " + root.fmtSteps(a) + " active") }
+      })
+      st = root.weekStats(slots)
+      var act = root.weekStats(slots, function (s) { return s.parts.length > 1 ? s.parts[1] : null })
+      return Object.assign({}, empty, {
+        "title": "Calories", "icon": "󰈸", "variant": "stacked", "days": slots,
+        "partColors": [Util.alpha(fg, 0.28), ac],
+        "legend": [{ "label": "Resting", "color": Util.alpha(fg, 0.28) }, { "label": "Active", "color": ac }],
+        "summary": st ? "avg " + root.fmtSteps(Math.round(st.avg)) + " kcal" + (act ? " · avg active " + root.fmtSteps(Math.round(act.avg)) : "") : ""
+      })
+    }
+    case "curve": {
+      slots = root.weekSlots(function (e) {
+        var avg = root.num(e.stressAvg)
+        var parts = [root.minutesOr0(e.stressRestMin), root.minutesOr0(e.stressLowMin),
+                     root.minutesOr0(e.stressMedMin), root.minutesOr0(e.stressHighMin)]
+        var measured = parts[0] + parts[1] + parts[2] + parts[3]
+        if (avg === null && measured === 0) return null
+        return { "value": measured, "parts": parts,
+                 "valueText": avg === null ? "—" : root.fmtNumber(avg),
+                 "tipText": (avg === null ? "" : "avg " + root.fmtNumber(avg) + " · ") + "rest " + root.fmtDuration(parts[0])
+                   + " · low " + root.fmtDuration(parts[1]) + " · medium " + root.fmtDuration(parts[2]) + " · high " + root.fmtDuration(parts[3]) }
+      })
+      var av = root.weekStats(slots, function (s) { return s.valueText === "—" ? null : Number(s.valueText) })
+      var hi = root.weekStats(slots, function (s) { return s.parts.length > 3 ? s.parts[3] : null })
+      // The curve card's figure is Body Battery; this page is about stress.
+      var todayStress = slots.length > 0 && slots[slots.length - 1].present ? slots[slots.length - 1].valueText : "—"
+      return Object.assign({}, empty, {
+        "title": "Stress", "icon": "󰐰", "variant": "stacked", "days": slots, "headline": todayStress,
+        "partColors": [Util.alpha(fg, 0.22), Util.alpha(ac, 0.35), Util.alpha(ac, 0.7), root.urgentColor],
+        "legend": [{ "label": "Rest", "color": Util.alpha(fg, 0.22) }, { "label": "Low", "color": Util.alpha(ac, 0.35) },
+                   { "label": "Medium", "color": Util.alpha(ac, 0.7) }, { "label": "High", "color": root.urgentColor }],
+        "summary": (av ? "avg stress " + root.fmtNumber(Math.round(av.avg)) : "")
+          + (hi ? (av ? " · " : "") + "high " + root.fmtDuration(Math.round(hi.avg)) + "/day" : "")
+      })
+    }
+    default:
+      return empty
+    }
+  }
+
   // Every token in display order — chosen ones first, then the rest — plus the
   // subset that is actually on. Only the enabled part is persisted, so the
   // parked position of a hidden card lasts as long as the panel is open and
@@ -1149,11 +1399,16 @@ Panel {
       // Escape leaves edit mode first and only closes the panel on a second
       // press — the same shape every modal editor has, and the alternative
       // (panel vanishes mid-rearrange) loses the user their place.
-      onCloseRequested: root.editMode ? root.endEdit() : root.close()
+      onCloseRequested: root.detailMode ? root.closeDetail() : root.editMode ? root.endEdit() : root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) { if (root.editMode) root.editMove(dx, dy) }
       onActivateRequested: if (root.editMode) root.editActivate()
       onTextKey: function(t) {
+        if (root.detailMode) {
+          // The week view is read-only; refresh still works, edit does not.
+          if (t === "r" || t === "R") root.refresh(true)
+          return
+        }
         if (root.editMode) {
           // j/k/h/l already arrive as moveRequested; only the exits matter here.
           if (t === "e" || t === "E") root.endEdit()
@@ -1172,21 +1427,22 @@ Panel {
         PanelHero {
           width: parent.width
           title: "Garmin"
-          meta: root.editMode ? "Editing cards" : root.heroMeta
+          meta: root.detailMode ? root.detail.title + " · last 7 days" : root.editMode ? "Editing cards" : root.heroMeta
           foreground: root.foreground
           fontFamily: root.fontFamily
           // The pencil sits in the hero's own trailing slot, which reserves
           // the space and centres the control against the labels.
           trailingControl: Component {
             PanelActionButton {
-              // nf-md-pencil while looking, nf-md-check while editing.
-              iconText: root.editMode ? "󰄬" : "󰏫"
-              tooltipText: root.editMode ? "Done" : "Edit cards"
+              // nf-md-pencil while looking, nf-md-check while editing,
+              // nf-md-arrow_left on a detail page.
+              iconText: root.detailMode ? "󰁍" : root.editMode ? "󰄬" : "󰏫"
+              tooltipText: root.detailMode ? "Back" : root.editMode ? "Done" : "Edit cards"
               foreground: root.editMode ? root.accentColor : root.foreground
               hoverColor: root.foreground
               fontFamily: root.fontFamily
               bordered: true
-              onClicked: root.toggleEdit()
+              onClicked: root.detailMode ? root.closeDetail() : root.toggleEdit()
             }
           }
           iconComponent: Component {
@@ -1338,7 +1594,7 @@ Panel {
         // gets here — the delegates only place things.
         Column {
           id: cardsColumn
-          visible: root.showRows && !root.editMode
+          visible: root.showRows && !root.editMode && !root.detailMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -1424,6 +1680,8 @@ Panel {
                     caption: cardSlot.card.caption || ""
                     bodyBatterySeries: root.bbSeries
                     stressSeries: root.stressSeries
+                    clickable: root.expandable(cardSlot.modelData)
+                    onClicked: root.openDetail(cardSlot.modelData)
                     foreground: root.foreground
                     accentColor: root.accentColor
                     urgentColor: root.urgentColor
@@ -1446,6 +1704,8 @@ Panel {
                     tone: cardSlot.card.tone || ""
                     meterPercent: cardSlot.card.meterPercent === undefined ? -1 : cardSlot.card.meterPercent
                     strip: cardSlot.card.strip === undefined ? [] : cardSlot.card.strip
+                    clickable: root.expandable(cardSlot.modelData)
+                    onClicked: root.openDetail(cardSlot.modelData)
                     foreground: root.foreground
                     accentColor: root.accentColor
                     urgentColor: root.urgentColor
@@ -1462,6 +1722,90 @@ Panel {
           }
         }
 
+        // ---- Detail page: one metric, the last seven days
+        Column {
+          visible: root.detailMode
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSeparator { foreground: root.foreground }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(detailIcon.implicitHeight, detailTitle.implicitHeight, detailValue.implicitHeight)
+
+            Text {
+              textFormat: Text.PlainText
+              id: detailIcon
+              text: root.detail.icon
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.icon
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              id: detailTitle
+              text: root.detail.title
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+              anchors.left: detailIcon.right
+              anchors.leftMargin: Style.space(8)
+              anchors.right: detailValue.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            // Today's figure, as the card shows it, so the page opens on the
+            // number the user just clicked.
+            Text {
+              textFormat: Text.PlainText
+              id: detailValue
+              readonly property var card: root.detailMode ? root.cardFor(root.detailToken, false) : null
+              text: root.detail.headline !== null && root.detail.headline !== undefined
+                ? String(root.detail.headline) : (card && card.value ? String(card.value) : "—")
+              color: root.showStale ? root.dim : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          WeekView {
+            width: parent.width
+            days: root.detail.days
+            variant: root.detail.variant
+            fixedMax: root.detail.fixedMax
+            axisMin: root.detail.axisMin
+            band: root.detail.band
+            partColors: root.detail.partColors
+            legend: root.detail.legend
+            summary: root.detail.summary
+            foreground: root.foreground
+            accentColor: root.accentColor
+            urgentColor: root.urgentColor
+            dim: root.dim
+            fontFamily: root.fontFamily
+            muted: root.showStale
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: "Hover a day for detail · Esc or the arrow to go back"
+            color: root.dim
+            opacity: 0.7
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         // ---- Custom card on its own, when the Garmin cards cannot render
         //
         // The card list above is gated on having a Garmin payload, which the
@@ -1471,7 +1815,7 @@ Panel {
         // under the guidance block, so "not signed in" costs you the Garmin
         // cards and only those.
         Column {
-          visible: root.showCustomAlone && !root.editMode
+          visible: root.showCustomAlone && !root.editMode && !root.detailMode
           width: parent.width
           spacing: Style.space(8)
 

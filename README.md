@@ -33,6 +33,16 @@ day's value — and each day's steps bar is scaled against that day's own Garmin
 goal; a `↗ ↘ →` delta is drawn on sleep, steps and resting HR. The rest of the
 cards (curve, intensity, floors, activity, custom) show a figure only. Every
 card gets a footer timestamp and a Refresh button.
+
+**Click a card for its week.** Battery, sleep, steps, readiness, resting HR,
+HRV and calories — and the day curve, which opens the week's **stress** — each
+have a detail page: a full-width chart of the last seven days with a value
+over every column, a hover tooltip per day, and a line of week statistics.
+Sleep stacks deep/light/REM/awake, stress stacks rest/low/medium/high
+minutes, calories stack resting under active, Body Battery draws each day's
+low-to-high range, steps carry each day's own goal as a tick, and HRV shades
+your balanced band. `Escape` or the arrow in the header goes back. Cards that
+have no week behind them (intensity, floors, activity, custom) do not open.
 The pencil in the header rearranges the whole deck without leaving the panel —
 see [Rearranging the cards](#rearranging-the-cards-from-the-panel).
 
@@ -60,9 +70,11 @@ day fetches today only.
 | Action | Result |
 |---|---|
 | Left click the chip | Open / close the panel — opening also retries a failed or stale fetch (a `live` state is left alone) |
+| Left click a card | Open that metric's seven-day detail page (see above) |
+| Arrow icon (panel header, detail page) | Back to the cards |
 | Middle click the chip | Force a refresh — today's numbers and the whole week's history |
 | Pencil icon (panel header) | Enter / leave edit mode |
-| `Escape` (panel focused) | Leave edit mode, or close the panel |
+| `Escape` (panel focused) | Leave the detail page, else leave edit mode, else close the panel |
 | `e` (panel focused) | Enter / leave edit mode |
 | `r` (panel focused) | Refresh today and the week (ignored while in edit mode) |
 | `c` (panel focused) | Copy the suggested command to the clipboard (only when a guidance command is shown) |
@@ -71,6 +83,7 @@ day fetches today only.
 | `space` / `Enter` (edit mode) | Show or hide the row — the two keys are equivalent |
 | `Tab` / `Shift-Tab` (panel focused) | Switch to the next / previous bar-widget's panel (multi-monitor setups) |
 | `omarchy-shell garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
+| `omarchy-shell garmin detail sleep` | Open the panel straight onto one metric's week (`battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `calories`, or `curve` for stress) |
 
 ---
 
@@ -163,6 +176,13 @@ than the poll interval.
 
 ## What's new in 0.4.0
 
+- **Click a card for its week.** Every card with history behind it opens a
+  full-width seven-day page: stacked sleep stages, stacked stress minutes,
+  resting-under-active calories, Body Battery low-to-high ranges, steps with
+  each day's goal tick, HRV against its balanced band, resting HR and
+  readiness as plain bars — each with per-day labels, hover tooltips and a
+  week summary. `Escape` or the header arrow returns.
+  `omarchy-shell garmin detail <metric>` opens one from a keybind.
 - **A week on every card.** The seven-day strip now sits under readiness,
   resting HR, HRV and calories as well as battery, sleep and steps, and the
   steps bars are scaled against each day's own goal. Hover a bar for the date
@@ -419,7 +439,7 @@ omarchy plugin validate .            # manifest schema check
 
 The plugin is `manifest.json`, `Service.qml` (poller and state machine),
 `BarWidget.qml` (the chip), `Panel.qml` (the detail panel) with its
-`MetricCard.qml` / `Meter.qml` / `CurveCard.qml` pieces, and the Python helper
+`MetricCard.qml` / `Meter.qml` / `CurveCard.qml` / `WeekView.qml` pieces, and the Python helper
 in `bin/garmin-widget`. The helper's contract is that every
 subcommand prints exactly one JSON object to stdout and exits 0 — errors are
 data, never a non-zero exit, so a failed fetch can never blank the bar.
