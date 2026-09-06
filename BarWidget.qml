@@ -111,15 +111,24 @@ BarWidget {
   //
   // On a single screen the fan-out is a list of one, so the primary handles
   // its own request directly and nothing about the behaviour changes.
-  function requestRefresh() {
-    root.broadcast("refresh")
+  //
+  // `week` also re-fetches the trailing seven days. broadcast() relays a
+  // method name and nothing else, so the flag travels as a second target
+  // (`refreshWeek`) rather than as an argument.
+  function requestRefresh(week) {
+    root.broadcast(week === true ? "refreshWeek" : "refresh")
   }
 
-  // The broadcast target. Named `refresh` because that is the string
-  // BarWidget.broadcast() looks up on each peer.
+  // The broadcast targets. Named `refresh` / `refreshWeek` because those are
+  // the strings BarWidget.broadcast() looks up on each peer.
   function refresh() {
     if (!root.isPrimaryInstance()) return
-    service.refresh()
+    service.refresh(false)
+  }
+
+  function refreshWeek() {
+    if (!root.isPrimaryInstance()) return
+    service.refresh(true)
   }
 
   // ---- Multi-screen coordination
@@ -374,7 +383,7 @@ BarWidget {
     target: "garmin"
     enabled: root.ipcEnabled
 
-    function refresh(): void { root.requestRefresh() }
+    function refresh(): void { root.requestRefresh(true) }
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
@@ -396,7 +405,7 @@ BarWidget {
     verticalPadding: 8.75
 
     onPressed: function(b) {
-      if (b === Qt.MiddleButton) root.requestRefresh()
+      if (b === Qt.MiddleButton) root.requestRefresh(true)
       else root.togglePanel()
     }
 

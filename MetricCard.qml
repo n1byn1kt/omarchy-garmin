@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 
 // One metric, one tinted card: icon + title on the left, the figure on the
 // right, and — when the payload has them — a goal meter, a caption, and a
@@ -29,9 +30,10 @@ Rectangle {
   // yet today) and still draws an empty track.
   property real meterPercent: -1
 
-  // [{ label: "Tu", frac: 0.62, present: true }, …] — always seven entries
-  // when present at all; absent days keep their faint track so a two-day
-  // history reads as "we only have two days", not as five zero days.
+  // [{ label: "Tu", frac: 0.62, present: true, tip: "Tu Sep 2 · 8,953" }, …]
+  // — always seven entries when present at all; absent days keep their faint
+  // track so a two-day history reads as "we only have two days", not as five
+  // zero days. `tip` is the hover text; it is pre-formatted by the caller.
   property var strip: []
 
   property color foreground: Color.foreground
@@ -191,6 +193,22 @@ Rectangle {
             radius: track.radius
             height: Math.max(2, track.height * Math.max(0, Math.min(1, Number(slot.modelData.frac) || 0)))
             color: slot.isLatest ? card.fillColor : Util.alpha(card.foreground, 0.28)
+          }
+
+          // Hover to read the bar. The tooltip is the cheapest answer to "what
+          // was Tuesday" and needs no expanded view behind it.
+          MouseArea {
+            id: slotMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            cursorShape: Qt.ArrowCursor
+
+            PanelToolTip {
+              visible: slotMouse.containsMouse && String(slot.modelData.tip || "") !== ""
+              text: String(slot.modelData.tip || "")
+              fontFamily: card.fontFamily
+            }
           }
 
           Text {

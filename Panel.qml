@@ -59,9 +59,15 @@ Panel {
   // happens to own it, and asking it directly would spawn a helper on a
   // non-primary instance whose result nobody ever publishes. requestRefresh()
   // routes the intent to the primary, which fans the payload back out.
-  function refresh() {
-    if (root.hostWidget && typeof root.hostWidget.requestRefresh === "function") root.hostWidget.requestRefresh()
-    else if (root.service && typeof root.service.refresh === "function") root.service.refresh()
+  //
+  // `week` re-fetches the trailing seven days too. It is what the user's
+  // explicit refresh (button, `r`) asks for; the panel-open retry below does
+  // not, because opening a panel on a stale morning must not become a
+  // fourteen-call burst every time.
+  function refresh(week) {
+    var burst = week === true
+    if (root.hostWidget && typeof root.hostWidget.requestRefresh === "function") root.hostWidget.requestRefresh(burst)
+    else if (root.service && typeof root.service.refresh === "function") root.service.refresh(burst)
   }
 
   // Opening the panel is a request to look at today's numbers, so a broken or
@@ -69,7 +75,7 @@ Panel {
   // already has it covered, and clicking the chip should not become a way to
   // hammer Garmin's API.
   function refreshIfStale() {
-    if (root.svcState !== "live" && root.svcState !== "loading") root.refresh()
+    if (root.svcState !== "live" && root.svcState !== "loading") root.refresh(false)
   }
 
   // ---- State
@@ -421,24 +427,57 @@ Panel {
   // Labels are weekdays, never "today": when the payload is stale the newest
   // entry may be yesterday's, and the footer is the one place that says how
   // old the data is.
-  function stripFor(field, fixedMax) {
+  //
+  // `opts.goal` names a per-day field (a step goal Garmin moves every day) to
+  // scale each bar against its own target instead of one week-wide max;
+  // `opts.fmt` formats the value for the hover tooltip. Both optional.
+  function stripFor(field, fixedMax, opts) {
     if (root.newestHistoryDate === "") return []
     var end = root.parseDay(root.newestHistoryDate)
     if (!end) return []
+    opts = opts || {}
 
     var slots = []
     var max = Number(fixedMax) > 0 ? Number(fixedMax) : 0
     for (var back = 6; back >= 0; back--) {
       var day = new Date(end.getFullYear(), end.getMonth(), end.getDate() - back)
-      var entry = root.historyByDate[root.dayKey(day)]
-      var value = entry ? root.num(entry[field]) : null
-      if (value !== null && Number(fixedMax) <= 0 && value > max) max = value
-      slots.push({ "label": root.weekdayNames[day.getDay()], "value": value, "present": value !== null, "frac": 0 })
+      var key = root.dayKey(day)
+      var entry = root.historyByDate[key]
+      var value = entry ? root.historyValue(entry, field) : null
+      var goal = entry && opts.goal ? root.historyValue(entry, opts.goal) : null
+      if (value !== null && Number(fixedMax) <= 0 && !(goal !== null && goal > 0) && value > max) max = value
+      var shown = value === null ? "—" : (typeof opts.fmt === "function" ? String(opts.fmt(value)) : root.fmtNumber(value))
+      slots.push({
+        "label": root.weekdayNames[day.getDay()],
+        "date": key,
+        "value": value,
+        "goal": goal,
+        "present": value !== null,
+        "frac": 0,
+        "tip": root.weekdayNames[day.getDay()] + " " + root.fmtDay(key) + " · " + shown
+      })
     }
 
-    for (var i = 0; i < slots.length; i++)
-      slots[i].frac = (slots[i].present && max > 0) ? Math.max(0, Math.min(1, slots[i].value / max)) : 0
+    for (var i = 0; i < slots.length; i++) {
+      var s = slots[i]
+      var scale = (s.goal !== null && s.goal > 0) ? s.goal : max
+      s.frac = (s.present && scale > 0) ? Math.max(0, Math.min(1, s.value / scale)) : 0
+    }
     return slots
+  }
+
+  // One history value, by its 0.4 name. Older cached rows (a stale last.json
+  // written before the upgrade) still carry `bodyBatteryHigh`; `calTotal` is
+  // not stored at all but is the figure the calories card shows.
+  function historyValue(entry, field) {
+    if (!entry) return null
+    if (field === "calTotal") {
+      var a = root.num(entry.calActive), r = root.num(entry.calResting)
+      return (a === null || r === null) ? null : a + r
+    }
+    var v = root.num(entry[field])
+    if (v === null && field === "bbHigh") v = root.num(entry.bodyBatteryHigh)
+    return v
   }
 
   // Change against the previous day we have a reading for. Only the two most
@@ -450,7 +489,7 @@ Panel {
   function deltaFor(field, lowerIsBetter) {
     var dated = []
     for (var i = 0; i < root.historySorted.length; i++) {
-      var v = root.num(root.historySorted[i][field])
+      var v = root.historyValue(root.historySorted[i], field)
       if (v !== null) dated.push({ "date": String(root.historySorted[i].date), "value": v })
     }
     if (dated.length < 2) return { "glyph": "", "tone": "" }
@@ -723,7 +762,7 @@ Panel {
         "value": root.batteryValue,
         "caption": root.batteryMeta,
         "tone": root.batteryTone(current),
-        "strip": dense ? [] : root.stripFor("bodyBatteryHigh", 100)
+        "strip": dense ? [] : root.stripFor("bbHigh", 100)
       }
     }
     case "sleep": {
@@ -757,7 +796,8 @@ Panel {
         "meterPercent": root.emptyToday ? -1 : root.stepsProgress * 100,
         "delta": root.emptyToday ? "" : d2.glyph,
         "deltaTone": root.emptyToday ? "" : d2.tone,
-        "strip": dense ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0))
+        "strip": dense ? [] : root.stripFor("steps", Math.max(root.stepsGoal, 0),
+                                             { "goal": "stepGoal", "fmt": root.fmtSteps })
       }
     }
     case "readiness": {
@@ -770,7 +810,8 @@ Panel {
         "title": "Training readiness",
         "value": root.fmtNumber(rs),
         "caption": level,
-        "tone": root.readinessTone(rs)
+        "tone": root.readinessTone(rs),
+        "strip": dense ? [] : root.stripFor("readiness", 100)
       }
     }
     case "rhr": {
@@ -782,7 +823,9 @@ Panel {
         "title": "Resting HR",
         "value": root.restingHrValue,
         "delta": root.emptyToday ? "" : d3.glyph,
-        "deltaTone": root.emptyToday ? "" : d3.tone
+        "deltaTone": root.emptyToday ? "" : d3.tone,
+        "strip": dense ? [] : root.stripFor("restingHr", 0,
+                                             { "fmt": function (v) { return root.fmtNumber(v) + " bpm" } })
       }
     }
     case "hrv": {
@@ -799,7 +842,9 @@ Panel {
         "title": "HRV",
         "value": last === null ? "—" : root.fmtNumber(last) + " ms",
         "caption": parts.join(" · "),
-        "tone": root.hrvTone(root.hrvInfo ? root.hrvInfo.status : "")
+        "tone": root.hrvTone(root.hrvInfo ? root.hrvInfo.status : ""),
+        "strip": dense ? [] : root.stripFor("hrvNight", 0,
+                                             { "fmt": function (v) { return root.fmtNumber(v) + " ms" } })
       }
     }
     case "intensity": {
@@ -839,7 +884,9 @@ Panel {
         "icon": "󰈸",
         "title": "Calories",
         "value": total === null ? "—" : root.fmtSteps(total) + " kcal",
-        "caption": active === null ? "" : root.fmtSteps(active) + " active"
+        "caption": active === null ? "" : root.fmtSteps(active) + " active",
+        "strip": dense ? [] : root.stripFor("calTotal", 0,
+                                             { "fmt": function (v) { return root.fmtSteps(v) + " kcal" } })
       }
     }
     case "activity": {
@@ -1112,7 +1159,7 @@ Panel {
           if (t === "e" || t === "E") root.endEdit()
           return
         }
-        if (t === "r" || t === "R") root.refresh()
+        if (t === "r" || t === "R") root.refresh(true)
         else if (t === "e" || t === "E") root.beginEdit()
         else if ((t === "c" || t === "C") && root.showGuidance) root.copy(root.guidanceCommand)
       }
@@ -1657,7 +1704,7 @@ Panel {
             fontSize: Style.font.bodySmall
             bordered: true
             focusable: true
-            onClicked: root.refresh()
+            onClicked: root.refresh(true)
           }
         }
       }

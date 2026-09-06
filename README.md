@@ -27,11 +27,12 @@ and the timestamp.
 **In the panel** — a stack of cards, in the order `panelMetrics` asks for them:
 the day's Body Battery and stress curve, sleep score and duration, steps against
 your Garmin step goal, training readiness, resting HR, and more (full list under
-[Settings](#settings)). A seven-day strip is drawn on the battery, sleep and
-steps cards; a `↗ ↘ →` delta is drawn on sleep, steps and resting HR. The rest
-of the cards (curve, readiness, HRV, intensity, floors, calories, activity,
-custom) show a figure only. Every card gets a footer timestamp and a Refresh
-button.
+[Settings](#settings)). A seven-day strip is drawn on the battery, sleep,
+steps, readiness, resting HR, HRV and calories cards — hover a bar for that
+day's value — and each day's steps bar is scaled against that day's own Garmin
+goal; a `↗ ↘ →` delta is drawn on sleep, steps and resting HR. The rest of the
+cards (curve, intensity, floors, activity, custom) show a figure only. Every
+card gets a footer timestamp and a Refresh button.
 The pencil in the header rearranges the whole deck without leaving the panel —
 see [Rearranging the cards](#rearranging-the-cards-from-the-panel).
 
@@ -45,16 +46,25 @@ comparison — just an older one; the footer's `· stale` is what tells you so.
 Before your watch has synced for the day, today's own figures show `—`, while
 the seven-day strips keep drawing from cache as usual.
 
+That history is **re-fetched, not accumulated**. On the first successful fetch
+of each calendar day — and on every manual refresh — the helper asks Garmin for
+the whole trailing week, one ranged call per metric, and merges the answer over
+what it already has: a real value always wins, and a day Garmin has nothing for
+(or an endpoint that failed) leaves the cached number alone. A laptop that was
+shut over the weekend therefore has no holes in its strips on Monday, and a
+figure Garmin has since corrected is corrected here too. Every other poll that
+day fetches today only.
+
 **Interactions**
 
 | Action | Result |
 |---|---|
 | Left click the chip | Open / close the panel — opening also retries a failed or stale fetch (a `live` state is left alone) |
-| Middle click the chip | Force a refresh |
+| Middle click the chip | Force a refresh — today's numbers and the whole week's history |
 | Pencil icon (panel header) | Enter / leave edit mode |
 | `Escape` (panel focused) | Leave edit mode, or close the panel |
 | `e` (panel focused) | Enter / leave edit mode |
-| `r` (panel focused) | Refresh (ignored while in edit mode) |
+| `r` (panel focused) | Refresh today and the week (ignored while in edit mode) |
 | `c` (panel focused) | Copy the suggested command to the clipboard (only when a guidance command is shown) |
 | `↑ ↓` / `j` `k` (edit mode) | Walk the rows — arrow keys and their `j`/`k` equivalents work interchangeably |
 | `← →` / `h` `l` (edit mode) | Reorder the current row (or pick the bar-chip metric on the top row) — arrow keys and their `h`/`l` equivalents work interchangeably |
@@ -151,6 +161,23 @@ than the poll interval.
 
 ---
 
+## What's new in 0.4.0
+
+- **A week on every card.** The seven-day strip now sits under readiness,
+  resting HR, HRV and calories as well as battery, sleep and steps, and the
+  steps bars are scaled against each day's own goal. Hover a bar for the date
+  and value.
+- **History that heals.** The trailing week is re-fetched from Garmin's ranged
+  endpoints on the first fetch of each day and on every manual refresh, then
+  merged over the cache — so a closed laptop no longer leaves permanent gaps.
+  Each row now carries steps and goal, sleep score, duration and stages,
+  resting HR, HRV with its balanced band, Body Battery high/low/charged/
+  drained, stress level and durations, calories, and readiness — the raw
+  material for richer week views later. Later polls the same day still make
+  exactly the calls they did before.
+- Manual refreshes (middle-click, the panel button, `r`, the IPC call) fetch
+  the week too and get a 120-second watchdog; the poller keeps its 45 seconds.
+
 ## What's new in 0.3.1
 
 Fixes: `customCommand` runs via argv rather than a shell string, the custom
@@ -217,13 +244,16 @@ python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widge
 ```
 
 Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
-calls this plugin makes (`Garmin()`, `login()`, `get_user_summary()`,
+calls this plugin makes — `Garmin()`, `login()`, `get_user_summary()`,
 `get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
 `get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
-`get_last_activity()`, `get_daily_steps()` — the ranged call the one-time
-history backfill uses) have been stable for a long time, and each one is asked
-for separately so a renamed endpoint costs you a card rather than the widget —
-but 0.3.11 is the version the widget was tested on.
+`get_last_activity()` for today, and the ranged `get_daily_steps()`,
+`get_rhr_daily()`, `get_sleep_daily()`, `get_body_battery(start, end)`,
+`get_hrv_data_range()`, `get_calories_daily()` plus one raw `connectapi()`
+call to the daily stress summary for the week — have been stable for a long
+time, and each one is asked for separately so a renamed endpoint costs you a
+card (or one field of the week) rather than the widget — but 0.3.11 is the
+version the widget was tested on.
 
 Nothing is installed system-wide, and nothing outside your home directory is
 touched. The helper re-execs itself into that venv automatically when
@@ -317,7 +347,7 @@ Everything this plugin writes lives under your home directory:
 | `~/.config/garmin-widget/tokens.json` | Garmin OAuth tokens, mode `0600`. No password. |
 | `~/.config/garmin-widget/prefs.json` | What you chose in the panel's edit mode — the card list and the bar metric, mode `0600`. Delete it to fall back to your `shell.json` settings. |
 | `~/.cache/garmin-widget/last.json` | Last successful reading, so the bar can show yesterday's numbers while offline. |
-| `~/.cache/garmin-widget/history.json` | Up to seven daily snapshots (sleep score, steps, Body Battery high, resting HR) — the source of the panel's strips and deltas. The first successful fetch backfills the past six days once, so the strips are full from the start; the `backfilled` flag in the file is what stops it running again. |
+| `~/.cache/garmin-widget/history.json` | Up to seven daily rows — steps and goal, sleep score, duration and stages, resting HR, HRV, Body Battery high/low/charged/drained, stress, calories, readiness — the source of the panel's strips and deltas. Re-fetched whole from Garmin's ranged endpoints on the first fetch of each day and on manual refresh (`windowFetchedOn` records when); other polls only update today's row. Older files are read and upgraded in place. |
 | `~/.local/share/garmin-widget/venv/` | The dedicated virtualenv holding `garminconnect`. |
 
 ---

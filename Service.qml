@@ -136,10 +136,14 @@ Item {
     } catch (e) {
       allowed = true
     }
-    if (allowed) root.refresh()
+    if (allowed) root.refresh(false)
   }
 
-  function refresh() {
+  // `week` asks the helper to re-fetch the trailing seven days as well as
+  // today (`fetch --week`). The poller never sets it — the helper does its
+  // own once-a-day window fetch — so it is reserved for the user's explicit
+  // refresh: middle-click, the panel's button, `r`, and the IPC call.
+  function refresh(week) {
     // The custom command is not part of the Garmin fetch, so it is kicked off
     // before the `running` guard below — a fetch already in flight must not
     // also swallow the refresh of a card that has nothing to do with it.
@@ -147,7 +151,11 @@ Item {
     if (fetchProcess.running) return
     _stdout = ""
     root.lastHint = ""
-    fetchProcess.command = [root.helperPath, "fetch"]
+    var burst = week === true
+    fetchProcess.command = burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
+    // Fourteen sequential Garmin calls with the library's own retries can
+    // outlast the 45s that a today-only fetch is allowed.
+    watchdog.interval = burst ? 120000 : 45000
     fetchProcess.running = true
     watchdog.restart()
   }
