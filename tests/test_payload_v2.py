@@ -162,9 +162,10 @@ def test_history_records_today_and_is_returned_in_the_payload(home, fake_garmin,
     _all_endpoints(fake_garmin)
     mod = load_helper()
     out = _fetch(mod, capsys)
-    assert out["history"][-1] == {
-        "date": mod.datetime.date.today().isoformat(), "sleepScore": 65,
-        "steps": 8000, "bodyBatteryHigh": 90, "restingHr": 52}
+    today = out["history"][-1]
+    assert today["date"] == mod.datetime.date.today().isoformat()
+    assert (today["sleepScore"], today["steps"], today["bbHigh"],
+            today["restingHr"]) == (65, 8000, 90, 52)
     on_disk = json.loads(mod.HISTORY_PATH.read_text())
     assert on_disk["days"] == out["history"]
 
@@ -179,18 +180,22 @@ def test_history_updates_todays_entry_in_place(home, fake_garmin, capsys):
     assert out["history"][-1]["steps"] == 9500
 
 
-def test_history_keeps_at_most_seven_days_newest_last(home, fake_garmin, capsys):
+def test_history_keeps_only_the_trailing_week_newest_last(home, fake_garmin, capsys):
+    import datetime
     _all_endpoints(fake_garmin)
     mod = load_helper()
     mod.HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    old = [{"date": f"2026-08-{d:02d}", "sleepScore": 50, "steps": 1,
-            "bodyBatteryHigh": 2, "restingHr": 3} for d in range(1, 12)]
+    today = datetime.date.today()
+    old = [{"date": (today - datetime.timedelta(days=b)).isoformat(),
+            "sleepScore": 50, "steps": 1, "bodyBatteryHigh": 2, "restingHr": 3}
+           for b in range(10, 0, -1)]
     mod.HISTORY_PATH.write_text(json.dumps(old))
     out = _fetch(mod, capsys)
     assert len(out["history"]) == 7
     assert [e["date"] for e in out["history"]] == sorted(
         e["date"] for e in out["history"])
-    assert out["history"][-1]["date"] == mod.datetime.date.today().isoformat()
+    assert out["history"][0]["date"] == (today - datetime.timedelta(days=6)).isoformat()
+    assert out["history"][-1]["date"] == today.isoformat()
 
 
 def test_corrupt_history_file_starts_fresh(home, fake_garmin, capsys):

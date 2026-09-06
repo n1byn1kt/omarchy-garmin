@@ -59,6 +59,13 @@ class FakeGarmin:
     summary_by_date = {}
     sleep_by_date = {}
     daily_steps = None
+    # Ranged (week) endpoints. None means "the source answered with nothing".
+    rhr_daily = None
+    sleep_daily = None
+    hrv_range = None
+    calories_daily = None
+    body_battery_range = None
+    stress_daily = None   # what connectapi() answers for the stress path
     calls = []        # every API method call, in order, for budget assertions
     login_exc = None
     body_battery = None
@@ -100,8 +107,30 @@ class FakeGarmin:
         return FakeGarmin.daily_steps
 
     def get_body_battery(self, cdate, *a):
-        self._maybe_raise("get_body_battery")
-        return FakeGarmin.body_battery
+        self._maybe_raise("get_body_battery", cdate, *a)
+        return FakeGarmin.body_battery_range if a else FakeGarmin.body_battery
+
+    def get_rhr_daily(self, start, end):
+        self._maybe_raise("get_rhr_daily", start, end)
+        return FakeGarmin.rhr_daily
+
+    def get_sleep_daily(self, start, end):
+        self._maybe_raise("get_sleep_daily", start, end)
+        return FakeGarmin.sleep_daily
+
+    def get_hrv_data_range(self, start, end):
+        self._maybe_raise("get_hrv_data_range", start, end)
+        return FakeGarmin.hrv_range
+
+    def get_calories_daily(self, start, end):
+        self._maybe_raise("get_calories_daily", start, end)
+        return FakeGarmin.calories_daily
+
+    def connectapi(self, path, **kw):
+        self._maybe_raise("connectapi", path)
+        if "/stats/stress/daily/" in path:
+            return FakeGarmin.stress_daily
+        return None
 
     def get_stress_data(self, cdate):
         self._maybe_raise("get_stress_data")
@@ -143,6 +172,12 @@ def fake_garmin(monkeypatch):
     FakeGarmin.summary_by_date = {}
     FakeGarmin.sleep_by_date = {}
     FakeGarmin.daily_steps = None
+    FakeGarmin.rhr_daily = None
+    FakeGarmin.sleep_daily = None
+    FakeGarmin.hrv_range = None
+    FakeGarmin.calories_daily = None
+    FakeGarmin.body_battery_range = None
+    FakeGarmin.stress_daily = None
     FakeGarmin.calls = []
     FakeGarmin.exc = {}
     monkeypatch.setitem(sys.modules, "garminconnect", fake)

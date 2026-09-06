@@ -23,6 +23,20 @@ CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
 HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
 
 HISTORY_DAYS = 7
+# One row per day in history.json. Every key is always present, None when no
+# source has ever had a value for it, so QML branches on null, not undefined.
+HISTORY_FIELDS = (
+    "steps", "stepGoal",
+    "sleepScore", "sleepMin", "deepMin", "lightMin", "remMin", "awakeMin",
+    "restingHr",
+    "hrvNight", "hrvWeekly", "hrvBalLow", "hrvBalHigh",
+    "bbHigh", "bbLow", "bbCharged", "bbDrained",
+    "stressAvg", "stressRestMin", "stressLowMin", "stressMedMin", "stressHighMin",
+    "calActive", "calResting",
+    "readiness",
+)
+# 0.2/0.3 wrote these names; they are mapped on load and never written again.
+LEGACY_FIELDS = {"bodyBatteryHigh": "bbHigh"}
 CURVE_POINTS = 96   # the panel's Canvas is ~300px wide; more is wasted JSON
 
 # Local JSON files are read whole before parsing, so a grown (or planted)
@@ -197,7 +211,7 @@ def _dispatch(argv) -> int:
     if cmd == "status":
         return cmd_status()
     if cmd == "fetch":
-        return cmd_fetch()
+        return cmd_fetch(week="--week" in argv[1:])
     if cmd == "login":
         return cmd_login()
     if cmd == "prefs":
@@ -429,9 +443,12 @@ def _safe(fn):
         return None
 
 
-def _fetch_extras(g, today):
+def _fetch_extras(g, today, skip_body_battery=False):
+    # On a burst poll the ranged body-battery call already covers today (it is
+    # the same endpoint with an end date), so the day call is skipped and
+    # cmd_fetch fills the key from the window instead.
     return {
-        "bodyBattery": _safe(lambda: g.get_body_battery(today)),
+        "bodyBattery": None if skip_body_battery else _safe(lambda: g.get_body_battery(today)),
         "stress": _safe(lambda: g.get_stress_data(today)),
         "hrv": _safe(lambda: g.get_hrv_data(today)),
         "readiness": _safe(lambda: g.get_training_readiness(today)),
@@ -509,7 +526,13 @@ def _load_cache():
         cached["hint"] = hint
     return cached
 
-def cmd_fetch() -> int:
+def cmd_fetch(week=False) -> int:
+    """Today's payload, plus the trailing week of history.
+
+    `week` (the `--week` flag) forces the ranged window fetch; otherwise it
+    runs only on the first successful fetch of a calendar day. Every other
+    poll is today-only — the same eight calls v0.2 made.
+    """
     if not HAS_GARMINCONNECT:
         return emit({"ok": False, "error": "deps",
                      "hint": DEPS_HINT})
@@ -527,9 +550,18 @@ def cmd_fetch() -> int:
         # I/O that can take seconds. A SIGTERM in that window (logout, a
         # bar restart) would otherwise leave a world-readable credential.
         _secure_tokens()
+        _, fetched_on = _load_history()
+        burst = week or fetched_on != today
         summary = g.get_user_summary(today) or {}
         sleep = g.get_sleep_data(today) or {}
-        payload = build_payload(summary, sleep, now, _fetch_extras(g, today))
+        extras = _fetch_extras(g, today, skip_body_battery=burst)
+        window = _fetch_window(g, _window_dates(today)[0], today) if burst else {}
+        if burst:
+            # The ranged answer carries today; fall back to the day call only
+            # when the ranged one failed, so the curve is never silently lost.
+            extras["bodyBattery"] = (_today_from_range(window.get("bodyBattery"), today)
+                                     or _safe(lambda: g.get_body_battery(today)))
+        payload = build_payload(summary, sleep, now, extras)
     except gc.GarminConnectAuthenticationError:
         return emit({"ok": False, "error": "auth-expired",
                      "hint": "run: garmin-widget login"})
@@ -548,9 +580,9 @@ def cmd_fetch() -> int:
         # ambient umask, whether or not the rest of the call succeeded.
         if TOKENS_PATH.exists():
             _secure_tokens()
-    # `g` is passed so the first successful fetch can backfill the week; a
-    # stale or failed fetch returned above and never gets here.
-    payload["history"] = _update_history(payload, today, g)
+    # A stale or failed fetch returned above and never gets here, so history
+    # is only ever rewritten from a payload Garmin actually answered.
+    payload["history"] = _update_history(payload, today, window, burst)
     _write_cache(payload)
     return emit(payload)
 
@@ -596,119 +628,243 @@ def _write_cache(payload) -> None:
     _atomic_write(CACHE_PATH, payload, ".last-")
 
 def _load_history():
-    """(days, backfilled) — whatever of history.json is usable. Never raises.
+    """(days, windowFetchedOn) — whatever of history.json is usable. Never raises.
 
     A truncated or hand-edited file must not cost the user their fetch, so
     anything unreadable is treated as "no history yet" and gets overwritten
-    on the next successful poll. Pre-0.3 installs wrote the bare day list;
-    that reads as "backfill not attempted yet" and is rewritten wrapped.
+    on the next successful poll. Pre-0.3 installs wrote the bare day list and
+    0.2/0.3 wrote {"backfilled", "days"}; both read as "window never fetched",
+    which is exactly right — the next fetch pulls the week and rewrites them.
     """
     try:
         data = _read_json_guarded(HISTORY_PATH, MAX_CACHE_BYTES)
     except Exception:
-        return [], False
-    backfilled = False
+        return [], None
+    fetched_on = None
     if isinstance(data, dict):
-        backfilled = data.get("backfilled") is True
+        stamp = data.get("windowFetchedOn")
+        fetched_on = stamp if isinstance(stamp, str) else None
         data = data.get("days")
     if not isinstance(data, list):
-        return [], False
+        return [], None
     return ([e for e in data
              if isinstance(e, dict) and isinstance(e.get("date"), str)],
-            backfilled)
+            fetched_on)
 
 
 def _dict(v):
     return v if isinstance(v, dict) else {}
 
 
-def _ranged_steps(g, start, end):
-    """{date: steps} for a date range, from the one call that covers a week.
+def _list(v):
+    return v if isinstance(v, list) else []
 
-    get_daily_steps returns [{"calendarDate", "totalSteps", ...}]. Six
-    per-day calls would work too; this is one, which is the whole reason the
-    backfill fits in a single burst.
+
+def _minutes(secs):
+    n = _num(secs)
+    return None if n is None else round(n / 60)
+
+
+def _window_dates(today):
+    """The seven ISO dates ending on `today`, oldest first."""
+    end = datetime.date.fromisoformat(today)
+    return [(end - datetime.timedelta(days=n)).isoformat()
+            for n in range(HISTORY_DAYS - 1, -1, -1)]
+
+
+def _fetch_window(g, start, end):
+    """Raw ranged responses for start..end, keyed by source.
+
+    One call per source, each isolated: a source that raises is simply absent
+    from the result, and absence means "leave the cache alone" downstream.
+    The stress path is a raw connectapi() call — garminconnect has no wrapper
+    for the daily stress summary — and is the least documented thing here;
+    if Garmin moves it, the stress fields stop updating and nothing else does.
     """
+    calls = {
+        "steps": lambda: g.get_daily_steps(start, end),
+        "rhr": lambda: g.get_rhr_daily(start, end),
+        "sleep": lambda: g.get_sleep_daily(start, end),
+        "bodyBattery": lambda: g.get_body_battery(start, end),
+        "hrv": lambda: g.get_hrv_data_range(start, end),
+        "calories": lambda: g.get_calories_daily(start, end),
+        "stress": lambda: g.connectapi(
+            f"/usersummary-service/stats/stress/daily/{start}/{end}"),
+    }
     out = {}
-    for row in _safe(lambda: g.get_daily_steps(start, end)) or []:
-        if isinstance(row, dict) and isinstance(row.get("calendarDate"), str):
-            out[row["calendarDate"]] = _num(row.get("totalSteps"))
+    for name, fn in calls.items():
+        try:
+            out[name] = fn()
+        except Exception:
+            pass
     return out
 
 
-def _backfill(g, history, today):
-    """Fill in the past week's history entries. Called at most once, ever.
+def _today_from_range(days, today):
+    """The ranged body-battery entry for `today`, in the list shape
+    build_curve expects — or None."""
+    for d in _list(days):
+        if isinstance(d, dict) and d.get("date") == today:
+            return [d]
+    return None
 
-    A fresh install has one day of history, so every seven-day strip in the
-    panel is six-sevenths empty until a week of polling goes by. This pulls
-    the missing days once: one ranged steps call plus, per missing day, the
-    sleep and user-summary calls that carry the other three fields
-    (restingHeartRate and bodyBatteryHighestValue both live in the summary,
-    so get_rhr_day would be a third call for data already in hand).
 
-    Every call is _safe-wrapped: a day Garmin has nothing for, or an endpoint
-    that 500s, costs that field and nothing else.
+def _bb_levels(day):
+    """Numeric body battery levels from one ranged day entry, nulls dropped."""
+    rows = _list(day.get("bodyBatteryValuesArray"))
+    vi = _desc_index(day.get("bodyBatteryValueDescriptorDTOList"), "bodyBatteryLevel")
+    vi = 1 if vi is None else vi
+    out = []
+    for r in rows:
+        if isinstance(r, (list, tuple)) and len(r) > vi:
+            v = _num(r[vi])
+            if v is not None:
+                out.append(v)
+    return out
+
+
+def _window_rows(raw):
+    """{date: {field: value}} from the raw ranged responses.
+
+    Only real values are recorded. A day a source did not mention, or
+    mentioned with a null, contributes nothing — so downstream a missing key
+    means "no news", never "the value is now nothing".
     """
-    have = {e.get("date") for e in history}
-    start = datetime.date.fromisoformat(today)
-    missing = [d for d in
-               ((start - datetime.timedelta(days=n)).isoformat()
-                for n in range(HISTORY_DAYS - 1, 0, -1))
-               if d not in have]
-    if not missing:
-        return history
-    steps = _ranged_steps(g, missing[0], missing[-1])
-    for day in missing:
-        summary = _dict(_safe(lambda: g.get_user_summary(day)))
-        sleep = _dict(_safe(lambda: g.get_sleep_data(day)))
-        entry = {
-            "date": day,
-            "sleepScore": _get(sleep, "dailySleepDTO", "sleepScores",
-                               "overall", "value"),
-            "steps": steps.get(day, summary.get("totalSteps")),
-            "bodyBatteryHigh": summary.get("bodyBatteryHighestValue"),
-            "restingHr": summary.get("restingHeartRate"),
-        }
-        # A day the watch was in a drawer has nothing worth a row. The marker
-        # below — not the presence of a row — is what stops the retry.
-        if any(v is not None for k, v in entry.items() if k != "date"):
-            history.append(entry)
-    return history
+    rows = {}
+
+    def put(date, field, value):
+        if isinstance(date, str) and value is not None:
+            rows.setdefault(date, {})[field] = value
+
+    for r in _list(raw.get("steps")):
+        r = _dict(r)
+        put(r.get("calendarDate"), "steps", _round(r.get("totalSteps")))
+        put(r.get("calendarDate"), "stepGoal", _round(r.get("stepGoal")))
+    for r in _list(raw.get("rhr")):
+        r = _dict(r)
+        put(r.get("calendarDate"), "restingHr", _round(r.get("value")))
+    for r in _list(raw.get("sleep")):
+        r = _dict(r)
+        v = _dict(r.get("values"))
+        d = r.get("calendarDate")
+        put(d, "sleepScore", _round(v.get("sleepScore")))
+        put(d, "sleepMin", _minutes(v.get("totalSleepTimeInSeconds")))
+        put(d, "deepMin", _minutes(v.get("deepTime")))
+        put(d, "lightMin", _minutes(v.get("lightTime")))
+        put(d, "remMin", _minutes(v.get("remTime")))
+        put(d, "awakeMin", _minutes(v.get("awakeTime")))
+    for r in _list(raw.get("bodyBattery")):
+        r = _dict(r)
+        d = r.get("date")
+        levels = _bb_levels(r)
+        if levels:
+            put(d, "bbHigh", round(max(levels)))
+            put(d, "bbLow", round(min(levels)))
+        put(d, "bbCharged", _round(r.get("charged")))
+        put(d, "bbDrained", _round(r.get("drained")))
+    for r in _list(_dict(raw.get("hrv")).get("hrvSummaries")):
+        r = _dict(r)
+        d = r.get("calendarDate")
+        base = _dict(r.get("baseline"))
+        put(d, "hrvNight", _round(r.get("lastNightAvg")))
+        put(d, "hrvWeekly", _round(r.get("weeklyAvg")))
+        put(d, "hrvBalLow", _round(base.get("balancedLow")))
+        put(d, "hrvBalHigh", _round(base.get("balancedUpper")))
+    for r in _list(raw.get("calories")):
+        r = _dict(r)
+        put(r.get("calendarDate"), "calActive", _round(r.get("active")))
+        put(r.get("calendarDate"), "calResting", _round(r.get("resting")))
+    for r in _list(raw.get("stress")):
+        r = _dict(r)
+        v = _dict(r.get("values"))
+        d = r.get("calendarDate")
+        put(d, "stressAvg", _round(v.get("overallStressLevel")))
+        put(d, "stressRestMin", _minutes(v.get("restStressDuration")))
+        put(d, "stressLowMin", _minutes(v.get("lowStressDuration")))
+        put(d, "stressMedMin", _minutes(v.get("mediumStressDuration")))
+        put(d, "stressHighMin", _minutes(v.get("highStressDuration")))
+    return rows
 
 
-def _update_history(payload, today, g=None):
-    """Record today's snapshot and return the trailing week of them.
+def _live_row(payload):
+    """Today's history fields as the live payload knows them (values only)."""
+    total = _num(_get(payload, "calories", "total"))
+    active = _num(_get(payload, "calories", "active"))
+    row = {
+        "steps": _get(payload, "steps", "count"),
+        "stepGoal": _get(payload, "steps", "goal"),
+        "sleepScore": _get(payload, "sleep", "score"),
+        "sleepMin": _get(payload, "sleep", "durationMin"),
+        "bbHigh": _get(payload, "bodyBattery", "high"),
+        "bbLow": _get(payload, "bodyBattery", "low"),
+        "restingHr": payload.get("restingHr"),
+        "readiness": _get(payload, "readiness", "score"),
+        "hrvNight": _get(payload, "hrvStatus", "lastNightAvg"),
+        "hrvWeekly": _get(payload, "hrvStatus", "weeklyAvg"),
+        "calActive": active,
+        "calResting": (round(total - active)
+                       if total is not None and active is not None else None),
+    }
+    return {k: v for k, v in row.items() if _num(v) is not None}
 
-    Deltas and sparklines are computed QML-side from this list, which is why
-    it ships inside the payload rather than being read separately. The
-    payload keeps carrying a plain list; the {"backfilled", "days"} wrapper
-    is the on-disk format only.
+
+def _merge_row(date, layers):
+    """One full-schema row: later layers win, but only with real numbers.
+
+    Legacy names are mapped, unknown keys dropped, and anything that is not a
+    number (a planted string, a bool) is treated as absent — the cache is a
+    file anyone with the home directory can edit.
+    """
+    row = {"date": date}
+    row.update({f: None for f in HISTORY_FIELDS})
+    for layer in layers:
+        for k, v in _dict(layer).items():
+            k = LEGACY_FIELDS.get(k, k)
+            if k in HISTORY_FIELDS and _num(v) is not None:
+                row[k] = v
+    return row
+
+
+def _update_history(payload, today, window=None, burst=False):
+    """Merge cache, window and today's payload into the trailing week.
+
+    Per date, per field: live today > window > cache, and only values move —
+    a source that failed or had nothing for a day leaves the cached number
+    where it is. The list is pruned to the calendar week ending today, so a
+    row older than that goes even when the file is short. Today always gets a
+    row, even an all-null one on an empty morning, because the panel aligns
+    its strips on the newest date.
+
+    The stamp goes down whenever a burst was *attempted*: a rate-limited week
+    is not retried every half hour, only tomorrow or on a manual refresh.
+
+    The payload keeps carrying a plain list; the {"windowFetchedOn", "days"}
+    wrapper is the on-disk format only.
     """
     try:
-        entry = {
-            "date": today,
-            "sleepScore": _get(payload, "sleep", "score"),
-            "steps": _get(payload, "steps", "count"),
-            "bodyBatteryHigh": _get(payload, "bodyBattery", "high"),
-            "restingHr": payload.get("restingHr"),
-        }
-        history, backfilled = _load_history()
-        history = [e for e in history if e.get("date") != today]
-        history.append(entry)
-        if g is not None and not backfilled:
-            if len({e.get("date") for e in history}) < HISTORY_DAYS:
-                try:
-                    history = _backfill(g, history, today)
-                except Exception:
-                    # Best-effort and one-shot: whatever broke in there, the
-                    # marker still goes down so the burst never repeats.
-                    pass
-            backfilled = True
-        history.sort(key=lambda e: e["date"])
-        history = history[-HISTORY_DAYS:]
-        _atomic_write(HISTORY_PATH, {"backfilled": backfilled,
-                                     "days": history}, ".history-")
-        return history
+        dates = _window_dates(today)
+        cached, fetched_on = _load_history()
+        by_date = {}
+        for e in cached:
+            if e.get("date") in dates:
+                by_date.setdefault(e["date"], []).append(e)
+        win = _window_rows(_dict(window))
+        live = _live_row(payload)
+        rows = []
+        for d in dates:
+            layers = list(by_date.get(d, []))
+            if d in win:
+                layers.append(win[d])
+            if d == today:
+                layers.append(live)
+            if not layers and d != today:
+                continue
+            rows.append(_merge_row(d, layers))
+        if burst:
+            fetched_on = today
+        _atomic_write(HISTORY_PATH, {"windowFetchedOn": fetched_on,
+                                     "days": rows}, ".history-")
+        return rows
     except Exception:
         return []
 
