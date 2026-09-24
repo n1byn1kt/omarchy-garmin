@@ -63,7 +63,16 @@ what it already has: a real value always wins, and a day Garmin has nothing for
 (or an endpoint that failed) leaves the cached number alone. A laptop that was
 shut over the weekend therefore has no holes in its strips on Monday, and a
 figure Garmin has since corrected is corrected here too. Every other poll that
-day fetches today only.
+day fetches today only — unless the day's one ranged attempt came back with
+nothing at all (every source down, e.g. a rate limit), in which case the day
+is not marked done and the very next poll tries the whole week again, rather
+than waiting until tomorrow with a gap still in the strips.
+
+"Today" and the seven-day window both follow **the laptop's own clock and
+timezone**, not the timezone your Garmin account or watch is set to. If you
+are travelling, the calendar day the panel calls "today" is wherever this
+machine thinks it is, which can disagree with Garmin's own app for a few
+hours around midnight in either timezone.
 
 **Interactions**
 
@@ -175,6 +184,39 @@ that takes seconds delays nothing, but it also does not get to run more often
 than the poll interval.
 
 ---
+
+## What's new in 0.4.2
+
+Bugfixes only, found in a quality-control pass on 0.4.1 — no new cards or settings:
+
+- **Training readiness picks the newest reading, not just the first one.**
+  `get_training_readiness` is not reliably newest-first, and a duplicate poll
+  can append a stub entry with no score at all. The helper now prefers a
+  scored entry and, among those, the one with the latest timestamp.
+- **A failed weekly burst retries on the very next poll instead of waiting
+  until tomorrow.** Previously any burst attempt — even one where every
+  ranged call raised (a rate limit, say) — marked the day as "done," so a
+  gap in the strips from a bad burst stuck around for a full day.
+- **A stale reading now says why.** The panel and bar tooltip already showed
+  the specific error (its exception class only, never a raw message) when
+  there was nothing cached at all; now the same detail rides along on a
+  stale-but-cached payload too.
+- **The custom card publishes to other monitors as soon as it finishes**,
+  rather than waiting for the next Garmin poll to carry it along — a command
+  that takes a few seconds no longer shows stale or blank on a second screen
+  for up to `pollMinutes`.
+- **A promoted primary instance (e.g. after unplugging the old primary's
+  monitor) polls immediately** instead of waiting out the rest of the old
+  primary's interval; IPC ownership is also now rechecked on a 10-second
+  timer as a backstop between polls.
+- **Week-view charts no longer draw a missing value as zero.** A day with no
+  Body Battery low reading, no charged/drained figure, a sleep score but no
+  duration, an incomplete calorie split, or a missing stress bucket now
+  leaves that specific thing off the chart and out of its average — instead
+  of quietly drawing (and averaging in) a number Garmin never reported. A
+  negative Body Battery reading (Garmin's own "no valid reading" sentinel) is
+  also dropped from a ranged day's high/low, matching how the day curve
+  already treats it.
 
 ## What's new in 0.4.1
 
@@ -409,8 +451,8 @@ Open the panel to see which you are in.
 | **HELPER DEPENDENCY MISSING** | `garminconnect` is not importable and no venv was found. | Run the one-liner under [External dependency](#external-dependency-garminconnect). |
 | **NOT SIGNED IN** | No `~/.config/garmin-widget/tokens.json` yet. | Run `garmin-widget login` (path in the panel, copyable). |
 | **SESSION EXPIRED** | Garmin rejected the stored tokens. | Run `garmin-widget login` again. Tokens do expire; this is normal every so often. |
-| **OFFLINE** / **GARMIN API ERROR** | The network or Garmin Connect is unavailable. The specific error is shown. | Wait and hit Refresh. If a cached reading exists, the panel keeps showing it and marks the footer `· stale`. |
-| Rows shown, footer `· stale` | Last fetch failed but a previous reading is cached. | Nothing — the numbers are real, just old. Refresh when you are back online. |
+| **OFFLINE** / **GARMIN API ERROR** | The network or Garmin Connect is unavailable and nothing is cached yet. The specific error (its exception class, e.g. `ConnectionError`) is shown. | Wait and hit Refresh. |
+| Rows shown, footer `· stale` | Last fetch failed but a previous reading is cached. | Nothing — the numbers are real, just old. The tooltip and the panel footer both carry the same specific error the uncached case would have shown. Refresh when you are back online. |
 
 **Nothing appears in the bar at all.** Check the widget is enabled and placed:
 `omarchy plugin list`. After enabling, `omarchy restart shell`.

@@ -184,9 +184,14 @@ Item {
                 acc += seg
               }
             } else if (variant === "range") {
-              var hi = Number(d.value), lo = Number(d.lo)
-              if (!isFinite(lo)) lo = 0
-              var yh = yFor(hi), yl = yFor(lo)
+              // `d.lo` is a real null, not a missing-number placeholder, when
+              // the source never reported a low for the day — drawing it as
+              // 0 would extend the bar all the way to the floor, claiming a
+              // full drain that never happened. Draw just the high mark
+              // instead, the same thin bar an ordinary "bars" day gets.
+              var hi = Number(d.value)
+              var yh = yFor(hi)
+              var yl = d.lo === null ? yh : yFor(Number(d.lo))
               ctx.fillStyle = solid
               ctx.fillRect(x, yh, barW, Math.max(2, yl - yh))
             } else {

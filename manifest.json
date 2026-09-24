@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.n1byn1kt.garmin",
   "name": "Garmin",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": "n1byn1kt",
   "license": "MIT",
   "description": "Your Garmin day in the bar: a configurable metric chip (Body Battery, steps, sleep, or readiness) and a panel of customizable cards \u2014 day curve, sleep, steps, readiness, HRV, and more.",

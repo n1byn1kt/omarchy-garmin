@@ -33,7 +33,11 @@ def test_stale_cache_hostile_hint_and_detail_are_dropped(home, fake_garmin, caps
     fake_garmin.login_exc = ConnectionError("boom")
     rc, out = run(mod, ["fetch"], capsys)
     assert out["stale"] is True
-    assert "hint" not in out and "detail" not in out
+    assert "hint" not in out
+    # `detail` does reappear on a stale payload, but only ever the *current*
+    # failure's exception class name — the on-disk one (attacker-chosen, or
+    # just a leftover) is discarded by _load_cache before this overwrite.
+    assert out["detail"] == "ConnectionError"
     blob = json.dumps(out)
     assert "evil.example" not in blob
     # the actual data still comes through
@@ -48,7 +52,7 @@ def test_stale_cache_keeps_the_helpers_own_literal_hints(home, fake_garmin, caps
         fake_garmin.login_exc = ConnectionError("boom")
         rc, out = run(mod, ["fetch"], capsys)
         assert out["hint"] == hint
-        assert "detail" not in out
+        assert out["detail"] == "ConnectionError"
 
 
 def test_stale_cache_hint_must_match_exactly(home, fake_garmin, capsys):

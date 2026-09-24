@@ -94,6 +94,23 @@ def test_window_rows_carry_the_full_schema_with_units_normalised(home, fake_garm
     assert y["readiness"] is None                    # no ranged source for it
 
 
+def test_bb_levels_drops_negative_sentinels(home):
+    """_bb_levels() feeds the ranged day's high/low — same -1/-2 "no valid
+    reading" sentinel _series() drops for the curve must not sneak a
+    negative low into a day's Body Battery range."""
+    mod = load_helper()
+    day_entry = {
+        "bodyBatteryValueDescriptorDTOList": [
+            {"bodyBatteryValueDescriptorKey": "timestamp", "index": 0},
+            {"bodyBatteryValueDescriptorKey": "bodyBatteryLevel", "index": 1},
+        ],
+        "bodyBatteryValuesArray": [
+            [1000, -1], [2000, 40], [3000, -2], [4000, 55],
+        ],
+    }
+    assert mod._bb_levels(day_entry) == [40, 55]
+
+
 def test_burst_budget_is_fourteen_calls_with_body_battery_asked_once(home, fake_garmin, capsys):
     _all_endpoints(fake_garmin)
     _stock_week(fake_garmin)
@@ -262,7 +279,11 @@ def test_readiness_accumulates_and_survives_a_burst(home, fake_garmin, capsys):
 
 # --- degraded bursts ----------------------------------------------------------------
 
-def test_every_ranged_call_raising_still_stamps_the_day_and_serves_today(home, fake_garmin, capsys):
+def test_every_ranged_call_raising_leaves_the_stamp_unset_and_rebursts(home, fake_garmin, capsys):
+    """A burst that lands nothing (every ranged source raised) must not stamp
+    windowFetchedOn — stamping on an empty burst would strand the week at
+    whatever the cache had until tomorrow. Leaving it unset means the very
+    next poll bursts again, e.g. once the rate limit clears."""
     class TooManyRequestsError(Exception):
         pass
     _all_endpoints(fake_garmin)
@@ -273,10 +294,10 @@ def test_every_ranged_call_raising_still_stamps_the_day_and_serves_today(home, f
     assert out["ok"] is True
     assert [e["date"] for e in out["history"]] == [TODAY]
     assert _row(out, 0)["steps"] == 8000
-    assert _on_disk(mod)["windowFetchedOn"] == TODAY
+    assert _on_disk(mod)["windowFetchedOn"] is None
     fake_garmin.calls = []
     _fetch(load_helper(), capsys)
-    assert _ranged_calls(fake_garmin) == []           # not retried until tomorrow
+    assert _ranged_calls(fake_garmin) != []           # retried on the very next poll
 
 
 def test_today_row_exists_even_when_everything_is_null(home, fake_garmin, capsys):

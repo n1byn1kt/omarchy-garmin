@@ -345,8 +345,25 @@ def build_hrv(hrv):
 
 
 def build_readiness(readiness):
-    # get_training_readiness returns a list; the current reading is first.
-    r = readiness[0] if isinstance(readiness, list) and readiness else readiness
+    # get_training_readiness returns a list of the day's snapshots, and
+    # garminconnect's own typed model says the current one is the entry with
+    # the latest timestamp — not index 0, which its morning-readiness helper
+    # treats as the wake-up reading. A snapshot can also lack a score. Prefer
+    # entries that carry a score, then pick the one with the latest timestamp
+    # (ISO strings sort correctly as plain strings); if nothing has a
+    # timestamp, settle for the first candidate rather than guessing further.
+    r = readiness
+    if isinstance(readiness, list) and readiness:
+        candidates = [x for x in readiness if isinstance(x, dict)]
+        scored = [x for x in candidates if x.get("score") is not None]
+        pool = scored or candidates
+        stamped = [x for x in pool if x.get("timestamp") or x.get("timestampLocal")]
+        if stamped:
+            r = max(stamped, key=lambda x: x.get("timestamp") or x.get("timestampLocal") or "")
+        elif pool:
+            r = pool[0]
+        else:
+            r = None
     if not isinstance(r, dict):
         return None
     score, level = _round(r.get("score")), _clip(r.get("level"))
@@ -573,6 +590,12 @@ def cmd_fetch(week=False) -> int:
         cached = _load_cache()
         if cached is not None:
             cached["stale"] = True
+            # detail is the exception *class name* only, same rule as the
+            # no-cache branch below — and it rides on the emitted object
+            # only, not on `cached` before this point, so it never reaches
+            # last.json (that write already happened when this payload was
+            # fresh; _load_cache also strips any detail a prior write left).
+            cached["detail"] = type(e).__name__
             return emit(cached)
         # detail is the exception *class name* only. str(e) on a garminconnect
         # error routinely carries the account email or a token path, and this
@@ -714,7 +737,12 @@ def _today_from_range(days, today):
 
 
 def _bb_levels(day):
-    """Numeric body battery levels from one ranged day entry, nulls dropped."""
+    """Numeric body battery levels from one ranged day entry, nulls dropped.
+
+    Negative values are dropped too, same as _series() above: Garmin's own
+    "no valid reading" sentinel is negative, and a high/low computed over one
+    would report a battery level that never happened.
+    """
     rows = _list(day.get("bodyBatteryValuesArray"))
     vi = _desc_index(day.get("bodyBatteryValueDescriptorDTOList"), "bodyBatteryLevel")
     vi = 1 if vi is None else vi
@@ -722,7 +750,7 @@ def _bb_levels(day):
     for r in rows:
         if isinstance(r, (list, tuple)) and len(r) > vi:
             v = _num(r[vi])
-            if v is not None:
+            if v is not None and v >= 0:
                 out.append(v)
     return out
 
@@ -839,8 +867,11 @@ def _update_history(payload, today, window=None, burst=False):
     row, even an all-null one on an empty morning, because the panel aligns
     its strips on the newest date.
 
-    The stamp goes down whenever a burst was *attempted*: a rate-limited week
-    is not retried every half hour, only tomorrow or on a manual refresh.
+    The stamp only goes down when a burst *landed something*: `window` is the
+    raw per-source dict from `_fetch_window`, and it's empty when every ranged
+    call raised (a network blip, a rate limit). Stamping on an empty burst
+    would leave the week stuck at whatever the cache already had until
+    tomorrow; leaving it unset means the very next poll bursts again instead.
 
     The payload keeps carrying a plain list; the {"windowFetchedOn", "days"}
     wrapper is the on-disk format only.
@@ -864,7 +895,7 @@ def _update_history(payload, today, window=None, burst=False):
             if not layers and d != today:
                 continue
             rows.append(_merge_row(d, layers))
-        if burst:
+        if burst and window:
             fetched_on = today
         _atomic_write(HISTORY_PATH, {"windowFetchedOn": fetched_on,
                                      "days": rows}, ".history-")

@@ -37,6 +37,37 @@ def test_extra_metrics_from_real_shapes(home, fake_garmin, capsys):
                                    "distanceKm": 12.0, "date": "2026-01-15"}
 
 
+# --- readiness: pick the newest scored reading, not readiness[0] ------------
+
+def test_readiness_picks_newest_by_timestamp_older_first(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.readiness = [
+        {"score": 40, "level": "LOW", "timestamp": "2026-08-21T06:00:00.0"},
+        {"score": 75, "level": "HIGH", "timestamp": "2026-08-22T06:00:00.0"},
+    ]
+    out = _fetch(load_helper(), capsys)
+    assert out["readiness"] == {"score": 75, "level": "HIGH"}
+
+
+def test_readiness_picks_newest_by_timestamp_reversed_order(home, fake_garmin, capsys):
+    _all_endpoints(fake_garmin)
+    fake_garmin.readiness = [
+        {"score": 75, "level": "HIGH", "timestamp": "2026-08-22T06:00:00.0"},
+        {"score": 40, "level": "LOW", "timestamp": "2026-08-21T06:00:00.0"},
+    ]
+    out = _fetch(load_helper(), capsys)
+    assert out["readiness"] == {"score": 75, "level": "HIGH"}
+
+
+def test_readiness_newest_with_null_score_falls_back_to_older_scored(home, fake_garmin, capsys):
+    fake_garmin.readiness = [
+        {"score": 40, "level": "LOW", "timestamp": "2026-08-21T06:00:00.0"},
+        {"score": None, "level": None, "timestamp": "2026-08-22T06:00:00.0"},
+    ]
+    out = _fetch(load_helper(), capsys)
+    assert out["readiness"] == {"score": 40, "level": "LOW"}
+
+
 def test_last_activity_carries_no_coordinates_or_ids(home, fake_garmin, capsys):
     _all_endpoints(fake_garmin)
     fake_garmin.last_activity = dict(fixtures.LAST_ACTIVITY,

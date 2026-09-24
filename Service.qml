@@ -176,7 +176,10 @@ Item {
 
     if (payload.ok === true) {
       root.payload = payload
-      root.lastError = ""
+      // A stale payload carries `detail` — the failing call's exception class
+      // name, nothing attacker-chosen — so the tooltip can say *why* it's
+      // stale instead of just that it is. A live payload never has one.
+      root.lastError = payload.stale === true ? String(payload.detail || "") : ""
       root.lastHint = ""
       root.state = payload.stale === true ? "stale" : "live"
       root.refreshed()
@@ -293,10 +296,26 @@ Item {
   }
 
   // ---- custom card plumbing
+
+  // Emitted whenever the custom card's content settles — a good render or a
+  // failure message, either way something the bar chip has not shown yet.
+  // Not emitted from adopt(): a peer taking the primary's already-published
+  // result must stay silent, or every screen re-publishing what it just
+  // adopted would loop the bar forever (see adopt()'s own comment below).
+  signal customUpdated()
+
   function runCustom() {
     // No command, or the card switched off in edit mode: nothing runs and any
-    // card left over from the last configuration goes away with it.
+    // card left over from the last configuration goes away with it. A run
+    // already in flight for the *previous* command/enabled value is stopped
+    // too — otherwise its output would land after this and either resurrect
+    // a card that should be gone or overwrite it with a stale one.
     if (String(root.customCommand) === "" || !root.customEnabled) {
+      if (customProcess.running) {
+        customProcess.running = false
+        customWatchdog.stop()
+        customWatchdog.tripped = false
+      }
       root.customCard = null
       root.customError = ""
       return
@@ -356,6 +375,7 @@ Item {
   function customFail(detail) {
     root.customCard = null
     root.customError = String(detail || "")
+    root.customUpdated()
   }
 
   // One short single-line string, or "". Everything on this path ends up in a
@@ -429,6 +449,7 @@ Item {
       "tone": tone,
       "meterPercent": percent
     }
+    root.customUpdated()
   }
 
   property string _customOut: ""
@@ -443,6 +464,14 @@ Item {
       customWatchdog.stop()
       customWatchdog.tripped = false
       if (timedOut) return
+      // The command/enabled toggle can flip while this process was still
+      // running (edit mode is quick) — its output belongs to a config that
+      // no longer applies, so it is discarded rather than applied late.
+      if (String(root.customCommand) === "" || !root.customEnabled) {
+        root.customCard = null
+        root.customError = ""
+        return
+      }
       // 124 is timeout's own code, re-raised by the wrapper — but a command can
       // also exit 124 by itself. The output stays the verdict: only an empty
       // result is read as a hang; anything printed is judged as usual.

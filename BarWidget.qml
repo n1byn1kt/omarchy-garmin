@@ -90,6 +90,12 @@ BarWidget {
       root.publish()
       root.syncIpc()
     }
+    // The custom card can finish well after the Garmin fetch it rode in on
+    // (or on its own, mid-poll-interval, if a peer's config change re-ran it)
+    // — without this, a peer only sees the new custom card at the *next*
+    // refreshed(), which can be up to pollMinutes away. publish() already
+    // no-ops off the primary, so this is safe to call unconditionally.
+    onCustomUpdated: root.publish()
     // A pref written on this screen is a pref every screen's chip and panel
     // must honour, so the write fans out as a re-read rather than a copy.
     onPrefsWritten: root.broadcast("reloadPrefs")
@@ -370,19 +376,46 @@ BarWidget {
   //
   // Re-checked rather than bound: peers() is empty while the bar is still
   // registering widgets, so an eager binding would have every instance decide
-  // it was primary. syncIpc() runs once the bar has settled and again on every
-  // poll, so unplugging the primary's screen promotes a survivor within a
-  // cycle instead of leaving `qs ipc call garmin` permanently dead.
+  // it was primary. syncIpc() runs once the bar has settled, again on every
+  // poll and onBarChanged, and on a 10s repeating timer as a backstop for a
+  // monitor unplugged between those — so losing the primary's screen
+  // promotes a survivor within one cycle instead of leaving `qs ipc call
+  // garmin` permanently dead.
   property bool ipcEnabled: false
+
+  // False until the first syncIpc() has run to completion. Guards the
+  // promotion kick below: the initial settle is this instance *becoming*
+  // primary for the first time (nothing to catch up on), not a promotion.
+  property bool _ipcSettled: false
 
   function syncIpc() {
     root.ipcEnabled = root.isPrimaryInstance()
+  }
+
+  // A later false→true flip means a peer that *was* primary dropped out —
+  // unplugged monitor, crashed instance — and this one just inherited the
+  // job with no fetch of its own in flight. Poll immediately (still gated by
+  // canPoll/isPrimaryInstance inside Service.poll()) rather than leaving the
+  // chip on whatever the old primary last published for up to pollMinutes.
+  onIpcEnabledChanged: {
+    if (root.ipcEnabled && root._ipcSettled) service.poll()
   }
 
   Timer {
     id: ipcSettleTimer
     interval: 1500
     repeat: false
+    running: true
+    onTriggered: {
+      root.syncIpc()
+      root._ipcSettled = true
+    }
+  }
+
+  Timer {
+    id: ipcRecheckTimer
+    interval: 10000
+    repeat: true
     running: true
     onTriggered: root.syncIpc()
   }

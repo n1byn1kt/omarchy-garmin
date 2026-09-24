@@ -90,6 +90,11 @@ def test_fetch_transient_error_serves_stale_cache(home, fake_garmin, capsys):
     rc, out = run(mod2, ["fetch"], capsys)
     assert out["ok"] is True and out["stale"] is True
     assert out["bodyBattery"]["current"] == 61
+    # The stale payload keeps the failing call's error class, so the panel
+    # can say *why* it's stale — but that only rides on the emitted object;
+    # last.json was already written while the fetch was still fresh.
+    assert out["detail"] == "ConnectionError"
+    assert "detail" not in json.loads(mod2.CACHE_PATH.read_text())
 
 
 def test_fetch_transient_error_no_cache(home, fake_garmin, capsys):

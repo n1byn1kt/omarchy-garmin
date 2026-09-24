@@ -1042,8 +1042,17 @@ Panel {
         if (hi === null) return null
         var tip = root.fmtNumber(hi) + " high" + (lo === null ? "" : " · " + root.fmtNumber(lo) + " low")
         var c = root.num(e.bbCharged), dr = root.num(e.bbDrained)
-        if (c !== null || dr !== null) tip += " · +" + root.fmtNumber(c === null ? 0 : c) + " / −" + root.fmtNumber(dr === null ? 0 : dr)
-        return { "value": hi, "lo": lo === null ? 0 : lo, "valueText": root.fmtNumber(hi), "tipText": tip }
+        // Print only the side that actually exists — a "+0" or "−0" on a day
+        // that just never reported the other half reads as "nothing charged"
+        // rather than "no data", which is a different claim than the source
+        // is making.
+        if (c !== null && dr !== null) tip += " · +" + root.fmtNumber(c) + " / −" + root.fmtNumber(dr)
+        else if (c !== null) tip += " · +" + root.fmtNumber(c)
+        else if (dr !== null) tip += " · −" + root.fmtNumber(dr)
+        // `lo` stays null rather than 0 when the source has no low reading —
+        // the range draw and the avg-low stat both skip a null rather than
+        // treating a missing low as "drained to zero."
+        return { "value": hi, "lo": lo, "valueText": root.fmtNumber(hi), "tipText": tip }
       })
       st = root.weekStats(slots)
       var lo = root.weekStats(slots, function (s) { return s.lo })
@@ -1059,6 +1068,9 @@ Panel {
         var stages = [root.num(e.deepMin), root.num(e.lightMin), root.num(e.remMin), root.num(e.awakeMin)]
         var hasStages = stages.some(function (v) { return v !== null })
         var parts = hasStages ? stages.map(function (v) { return v === null ? 0 : v }) : [total === null ? 0 : total]
+        // A score with no duration and no stages keeps its slot (the score is
+        // real and stays readable) on a flat bar; the duration average below
+        // skips it, so it can't drag the week toward a zero-length night.
         var height = hasStages ? parts.reduce(function (a, b) { return a + b }, 0) : (total === null ? 0 : total)
         var tip = (score === null ? "" : "score " + root.fmtNumber(score) + " · ") + root.fmtDuration(total === null ? height : total)
         if (hasStages) tip += " · deep " + root.fmtDuration(parts[0]) + " · light " + root.fmtDuration(parts[1])
@@ -1066,7 +1078,7 @@ Panel {
         return { "value": height, "parts": parts,
                  "valueText": score === null ? root.fmtDuration(total) : root.fmtNumber(score), "tipText": tip }
       })
-      st = root.weekStats(slots)
+      st = root.weekStats(slots, function (s) { return s.value > 0 ? s.value : null })
       var sc = root.weekStats(slots, function (s) { return /^\d+$/.test(s.valueText) ? Number(s.valueText) : null })
       return Object.assign({}, empty, {
         "title": "Sleep", "icon": "󰒲", "variant": "stacked", "days": slots,
@@ -1149,8 +1161,11 @@ Panel {
     case "calories": {
       slots = root.weekSlots(function (e) {
         var a = root.num(e.calActive), r = root.num(e.calResting)
-        if (a === null && r === null) return null
-        var parts = [r === null ? 0 : r, a === null ? 0 : a]
+        // Matches historyValue()'s "calTotal" rule above: a total is only
+        // ever the sum of both halves, never one half plus an assumed zero
+        // for the other — a resting-only day is not "0 active calories."
+        if (a === null || r === null) return null
+        var parts = [r, a]
         var total = parts[0] + parts[1]
         return { "value": total, "parts": parts, "valueText": root.fmtSteps(total),
                  "tipText": root.fmtSteps(total) + " kcal" + (a === null ? "" : " · " + root.fmtSteps(a) + " active") }
@@ -1167,14 +1182,24 @@ Panel {
     case "curve": {
       slots = root.weekSlots(function (e) {
         var avg = root.num(e.stressAvg)
-        var parts = [root.minutesOr0(e.stressRestMin), root.minutesOr0(e.stressLowMin),
-                     root.minutesOr0(e.stressMedMin), root.minutesOr0(e.stressHighMin)]
-        var measured = parts[0] + parts[1] + parts[2] + parts[3]
+        // Kept as real nulls, not minutesOr0'd, so a bucket the day never
+        // reported stays out of its own average below (weekStats skips a
+        // null pick) and out of the tooltip — the stacked draw in
+        // WeekView.qml treats a null part the same as 0 already (nothing to
+        // stack), so "draws as zero height" needs no extra handling here.
+        var rest = root.num(e.stressRestMin), low = root.num(e.stressLowMin)
+        var med = root.num(e.stressMedMin), high = root.num(e.stressHighMin)
+        var parts = [rest, low, med, high]
+        var measured = root.minutesOr0(rest) + root.minutesOr0(low) + root.minutesOr0(med) + root.minutesOr0(high)
         if (avg === null && measured === 0) return null
+        var tipParts = []
+        if (rest !== null) tipParts.push("rest " + root.fmtDuration(rest))
+        if (low !== null) tipParts.push("low " + root.fmtDuration(low))
+        if (med !== null) tipParts.push("medium " + root.fmtDuration(med))
+        if (high !== null) tipParts.push("high " + root.fmtDuration(high))
         return { "value": measured, "parts": parts,
                  "valueText": avg === null ? "—" : root.fmtNumber(avg),
-                 "tipText": (avg === null ? "" : "avg " + root.fmtNumber(avg) + " · ") + "rest " + root.fmtDuration(parts[0])
-                   + " · low " + root.fmtDuration(parts[1]) + " · medium " + root.fmtDuration(parts[2]) + " · high " + root.fmtDuration(parts[3]) }
+                 "tipText": (avg === null ? "" : "avg " + root.fmtNumber(avg) + " · ") + tipParts.join(" · ") }
       })
       var av = root.weekStats(slots, function (s) { return s.valueText === "—" ? null : Number(s.valueText) })
       var hi = root.weekStats(slots, function (s) { return s.parts.length > 3 ? s.parts[3] : null })
@@ -1456,6 +1481,20 @@ Panel {
               font.pixelSize: Style.font.display
             }
           }
+        }
+
+        // ---- Stale footer: cached data is showing, so the hero already says
+        // "Showing last known data" — this line adds *why*, when the helper
+        // sent one (the failing call's exception class, never a raw string).
+        Text {
+          textFormat: Text.PlainText
+          visible: root.showStale && !root.editMode && root.lastError !== ""
+          width: parent.width
+          text: root.lastError
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
 
         // ---- Guidance: deps / no-tokens / auth-expired
