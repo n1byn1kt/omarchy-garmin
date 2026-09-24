@@ -189,6 +189,70 @@ def week_calories(backs=range(6, -1, -1)):
              "total": 1900.0 + b} for b in backs]
 
 
+# --- get_activities(0, ACTIVITY_LIMIT) ---------------------------------------
+# Probed 2026-09-24 (garminconnect 0.3.11, get_activities(0, 3)): a bare
+# list[dict], startTimeLocal/startTimeGMT as "YYYY-MM-DD HH:MM:SS" (space
+# separator, seconds present), duration/distance/averageHR/maxHR/calories/
+# elevationGain/averageSpeed all float. Every value below is invented — ids,
+# names, timestamps, distances, HR, owner/device/location — nothing here was
+# copied from that probe (see docs/implementation-notes-v5.md, gitignored,
+# for the field-name/type findings). The hostile fields (coordinates, owner
+# name/ids/profile images, device id, locationName, timeZoneId, polyline
+# flag, split summaries) are included with invented values on purpose: the
+# whitelist test proves build_activity drops every one of them.
+def _activity(back, hour, activity_id, type_key, name, duration_s, distance_m,
+             avg_hr=None, max_hr=None, kcal=None, elev_m=None, avg_speed=None):
+    local = f"{day(back)} {hour:02d}:14:33"
+    gmt = f"{day(back)} {(hour + 7) % 24:02d}:14:33"   # invented UTC offset
+    return {
+        "activityId": activity_id,
+        "activityUUID": {"uuid": f"11111111-0000-0000-0000-{activity_id:012d}"},
+        "activityName": name,
+        "activityType": {"typeId": 1, "typeKey": type_key, "parentTypeId": 17,
+                         "isHidden": False, "restricted": False, "trimmable": True},
+        "startTimeLocal": local,
+        "startTimeGMT": gmt,
+        "duration": duration_s,
+        "distance": distance_m,
+        "averageHR": avg_hr,
+        "maxHR": max_hr,
+        "calories": kcal,
+        "elevationGain": elev_m,
+        "averageSpeed": avg_speed,
+        # hostile / never-kept fields, invented values throughout:
+        "startLatitude": 10.0 + back,
+        "startLongitude": -20.0 - back,
+        "endLatitude": 10.1 + back,
+        "endLongitude": -20.1 - back,
+        "locationName": "Nowhereville",
+        "ownerId": 900000001,
+        "ownerDisplayName": "demo.user",
+        "ownerFullName": "Demo User",
+        "ownerProfileImageUrlSmall": "https://example.invalid/s.jpg",
+        "ownerProfileImageUrlMedium": "https://example.invalid/m.jpg",
+        "ownerProfileImageUrlLarge": "https://example.invalid/l.jpg",
+        "deviceId": 800000001 + back,
+        "timeZoneId": 55,   # invented; deliberately not the account's real tz id
+        "hasPolyline": True,
+        "hasSplits": True,
+        "splitSummaries": [{"distance": 1000.0, "duration": 300.0}],
+        "manufacturer": "GARMIN",
+        "privacy": {"typeKey": "public"},
+        "userRoles": ["ROLE_CONNECTUSER"],
+    }
+
+
+ACTIVITIES = [
+    _activity(1, 7, 10000000001, "running", "Morning Run", 3120.0, 8410.0,
+             avg_hr=143, max_hr=171, kcal=512, elev_m=86),
+    _activity(3, 17, 10000000002, "road_biking", "Evening Ride", 5400.0, 32000.0,
+             avg_hr=128, max_hr=160, kcal=780, elev_m=210, avg_speed=5.93),
+    _activity(6, 9, 10000000003, "hiking", "Trailhead Loop", 6420.0, 0.0),
+]
+
+ACTIVITIES_DICT_FORM = {"activityList": ACTIVITIES}
+
+
 def week_stress(backs=range(6, -1, -1)):
     # connectapi("/usersummary-service/stats/stress/daily/{start}/{end}") —
     # durations in SECONDS
