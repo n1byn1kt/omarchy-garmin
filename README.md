@@ -244,7 +244,8 @@ duration, distance, heart rate and calories, with a "this week" summary
 line when the list actually reaches back that far. `↑↓` / `j k` move the
 list's cursor, `Enter` / `→` / `l` opens the highlighted row, `←` / `h` or
 `Escape` goes back. Opening a row shows its detail page — duration,
-distance, pace (running/walking/hiking) or speed (cycling), heart rate,
+distance, pace (running/walking/hiking) or speed (cycling — Garmin's own
+average speed, so stops don't drag it down), heart rate,
 calories, elevation — and a bordered **Open in Garmin Connect** button
 (hidden for a demo activity, or one with no usable id).
 
@@ -262,13 +263,17 @@ disk, turn it off:
 ~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/bin/garmin-widget prefs set activityNames false
 ```
 
-(default: on). Unlike the settings above, this one lives only in
-`prefs.json`, not the bar widget's settings UI.
+(default: on). Turned off, it also applies to the list already cached —
+including one shown stale or carried forward after a failed poll. Unlike
+the settings above, this one lives only in `prefs.json`, not the bar
+widget's settings UI.
 
 If the activities endpoint fails on a given poll but a previous list is
 cached, the card and the list page keep showing that cached list, marked
 `stale`, rather than going blank — the same per-domain carry-forward rule
-covers readiness, HRV, intensity minutes and weight.
+covers readiness, HRV, intensity minutes and weight. A carried value is
+only ever shown, never written into that day's seven-day history: the day
+stays empty there until Garmin actually answers for it.
 
 ## Weight
 
@@ -276,7 +281,8 @@ An opt-in card — add `weight` to `panelMetrics` or turn its row on in edit
 mode — showing a 30-day weigh-in timeline with a `↗ ↘ →` delta against
 your previous weigh-in. It's opt-in because it's fetched only when it's
 actually on: `get_weigh_ins` is never called otherwise, and turning the
-card off stops the calls and the caching going forward. Units (kg or lb)
+card off stops the calls and the caching going forward. Toggling it in
+edit mode refetches straight away rather than at the next poll. Units (kg or lb)
 follow your Garmin account's own measurement-system setting, not a switch
 of the widget's own. Weight card contributed by @xshatx (PR #1).
 
@@ -294,7 +300,9 @@ of the widget's own. Weight card contributed by @xshatx (PR #1).
   `get_training_readiness(date)` call, so a laptop that slept through a
   weekend fills in both days' readiness the next time it wakes, at the
   cost of one call per still-missing day rather than waiting a day at a
-  time.
+  time. A day Garmin has no score for is asked at most once per calendar
+  day, and the backfill is skipped entirely when the `readiness` card
+  isn't in your deck.
 - **Weight card** (opt-in, fetched only when enabled, kg/lb from your
   Garmin account's own unit setting) — contributed by @xshatx (PR #1). See
   [Weight](#weight) above.
@@ -465,7 +473,10 @@ window fetch, or `--week`) the widget also makes one extra
 have a readiness score cached — so a laptop that slept through a whole
 weekend still ends up with readiness for both of those days the next
 time it wakes up, at the cost of one call per still-missing day rather
-than one per poll forever.
+than one per poll forever. A day that comes back without a score (or
+fails) is remembered in `history.json` and not asked again until the next
+calendar day, and none of these calls are made when the `readiness` card
+isn't in your deck (the Service passes `--no-readiness-backfill`).
 
 Nothing is installed system-wide, and nothing outside your home directory is
 touched. The helper re-execs itself into that venv automatically when
@@ -539,9 +550,10 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 **Weight is opt-in, and fetched only when it's on.** Body weight is more
 sensitive than a step count, so the helper never asks Garmin for it unless
 `weight` is actually in the effective deck (your `panelMetrics` setting or
-the panel's edit-mode override) — turning the card off again means the next
-poll stops calling `get_weigh_ins` entirely, nothing is cached going
-forward, and a payload with the card off simply has `"weight": null`. The
+the panel's edit-mode override) — turning the card off again refetches
+without calling `get_weigh_ins`, nothing is cached going forward, and a
+payload with the card off simply has `"weight": null` (a series cached
+while it was on is not served even from a stale cache). The
 card shows kg or lb, whichever your Garmin account's own unit setting says
 (metric/statute) — the widget follows Garmin's choice rather than having a
 setting of its own to get out of sync.
