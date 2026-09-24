@@ -339,7 +339,14 @@ one — same endpoint, a bigger limit), and the ranged `get_daily_steps()`,
 call to the daily stress summary for the week — have been stable for a long
 time, and each one is asked for separately so a renamed endpoint costs you a
 card (or one field of the week) rather than the widget — but 0.3.11 is the
-version the widget was tested on.
+version the widget was tested on. There's no ranged/history version of
+`get_training_readiness()` in 0.3.11, so on a burst (the once-per-day
+window fetch, or `--week`) the widget also makes one extra
+`get_training_readiness(date)` call per window day that doesn't already
+have a readiness score cached — so a laptop that slept through a whole
+weekend still ends up with readiness for both of those days the next
+time it wakes up, at the cost of one call per still-missing day rather
+than one per poll forever.
 
 Nothing is installed system-wide, and nothing outside your home directory is
 touched. The helper re-execs itself into that venv automatically when

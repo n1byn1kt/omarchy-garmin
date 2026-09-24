@@ -91,7 +91,10 @@ def test_window_rows_carry_the_full_schema_with_units_normalised(home, fake_garm
     assert y["stressAvg"] == 26
     assert (y["stressRestMin"], y["stressLowMin"]) == (600, 121)
     assert (y["stressMedMin"], y["stressHighMin"]) == (60, 30)
-    assert y["readiness"] is None                    # no ranged source for it
+    # v0.5 extra step: no ranged readiness endpoint exists, so a burst
+    # backfills it with one get_training_readiness(date) call per missing
+    # day instead — see test_readiness_backfill.py.
+    assert y["readiness"] == 54
 
 
 def test_bb_levels_drops_negative_sentinels(home):
@@ -112,10 +115,17 @@ def test_bb_levels_drops_negative_sentinels(home):
 
 
 def test_burst_budget_is_fourteen_calls_with_body_battery_asked_once(home, fake_garmin, capsys):
+    """v0.5 extra step: a burst against an empty cache also backfills
+    readiness for every one of the 6 non-today window days (none of them
+    have a cached score yet), one get_training_readiness(date) call each —
+    14 + 6 = 20. See test_readiness_backfill.py for the budget shrinking
+    once some of those days are already scored."""
     _all_endpoints(fake_garmin)
     _stock_week(fake_garmin)
     _fetch(load_helper(), capsys)
-    assert len(fake_garmin.calls) == 14
+    assert len(fake_garmin.calls) == 20
+    readiness_calls = [c for c in fake_garmin.calls if c[0] == "get_training_readiness"]
+    assert len(readiness_calls) == 7                 # today + 6 backfilled days
     bb = [c for c in fake_garmin.calls if c[0] == "get_body_battery"]
     assert bb == [("get_body_battery", (day(6), TODAY))]
 
