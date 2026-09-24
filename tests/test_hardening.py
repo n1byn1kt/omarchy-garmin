@@ -288,8 +288,8 @@ def test_api_display_strings_are_clipped(home):
     assert len(hrv["status"]) == mod.STR_CLIP
     rdy = mod.build_readiness([{"score": 80, "level": long}])
     assert len(rdy["level"]) == mod.STR_CLIP
-    act = mod.build_last_activity({"activityType": {"typeKey": long},
-                                   "duration": 60, "distance": 1000})
+    act = mod.build_activity({"activityType": {"typeKey": long},
+                              "duration": 60, "distance": 1000})
     assert len(act["type"]) == mod.STR_CLIP
 
 
@@ -367,12 +367,16 @@ def test_stale_cache_strings_are_clipped_everywhere(home, fake_garmin, capsys):
     assert "B" * (mod.STR_CLIP + 1) not in blob
 
 
-def test_activity_date_is_clipped(home):
+def test_activity_start_and_date_are_clipped(home):
+    """v0.5: `start` is normalised to 16 characters regardless of how long
+    the raw field is (it's a timestamp, not a display string with STR_CLIP's
+    80-character budget); `date` is derived from the already-short `start`."""
     mod = load_helper()
-    act = mod.build_last_activity({"activityType": {"typeKey": "run"},
-                                   "duration": 60, "distance": 1000,
-                                   "startTimeLocal": "X" * 5000})
-    assert len(act["date"]) == mod.STR_CLIP
+    act = mod.build_activity({"activityType": {"typeKey": "run"},
+                              "duration": 60, "distance": 1000,
+                              "startTimeLocal": "X" * 5000})
+    assert len(act["start"]) == 16
+    assert len(act["date"]) == 10
 
 
 def test_write_through_symlinked_plugin_dir_is_refused(home, fake_garmin, capsys):

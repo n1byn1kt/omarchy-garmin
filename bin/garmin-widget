@@ -381,26 +381,203 @@ def build_intensity(intensity):
     return {"weekly": weekly, "goal": goal}
 
 
-def build_last_activity(act):
-    """{type, durationMin, distanceKm, date} — and nothing else.
+# Fetched once per poll (Q2), replacing get_last_activity() one call for one.
+ACTIVITY_LIMIT = 20
+# Persisted/returned count — amendment 7 supersedes A3's "truncate to
+# ACTIVITY_LIMIT after building": the list a future UI can actually show
+# without scrolling is smaller than the fetch page. No list page exists in
+# this pass to measure against (Q5), so this is the plan's own draft
+# default; see docs/implementation-notes-v5.md.
+ACTIVITY_ROWS = 10
+ACTIVITY_NAME_CLIP = 48
 
-    The raw activity dict carries start coordinates, activity and device ids,
-    the owner's real name and profile image URLs. None of that belongs in a
-    file the panel reads, so this whitelists four fields rather than trimming.
-    The date is kept because the last activity is often weeks old and a card
-    that doesn't say so is just misleading.
+# typeKey substring families for the detail page's pace-vs-speed choice
+# (Q6): pace for anything run/walk/hike-shaped, speed for anything
+# cycle/bike-shaped, neither for swim/strength/yoga/etc. Substrings, not a
+# full enumeration, so trail_running/indoor_cycling/mountain_biking and
+# friends all match their family.
+_PACE_TYPE_HINTS = ("run", "walk", "hik")
+_SPEED_TYPE_HINTS = ("cycl", "bik")
+
+
+def _dual(raw, raw_key, built_key):
+    """raw[raw_key] if present, else raw[built_key].
+
+    build_activity accepts either a raw Garmin activity dict or its own
+    prior output (v0.5 amendment 4: a cached activities list is re-run
+    through build_activities on load, to re-enforce the whitelist against a
+    hand-edited cache). The two shapes never share a key name, so this is
+    enough to make every field below shape-agnostic without a second parser.
     """
-    if not isinstance(act, dict):
+    return raw.get(raw_key, raw.get(built_key))
+
+
+def _activity_id(v):
+    """A decimal-string id, 1..2**63-1, or None (v0.5 amendment 6).
+
+    Accepts an int (the raw shape) or an all-digit string (the already-built
+    shape, or a real Garmin activitiyId that arrived as a string). Always
+    emitted as a string: an id is a label here, not a quantity, and a URL
+    built from it must never be Number(id) — re-stringifying int(s) also
+    drops any leading zero, which cannot happen for a real id but costs
+    nothing to handle correctly.
+    """
+    n = None
+    if isinstance(v, bool):
+        n = None
+    elif isinstance(v, int):
+        n = v
+    elif isinstance(v, str) and v.isdigit():
+        n = int(v)
+    if n is None or not (1 <= n <= 2**63 - 1):
         return None
-    dur, dist = _num(act.get("duration")), _num(act.get("distance"))
-    type_key = _get(act, "activityType", "typeKey")
-    start = act.get("startTimeLocal")
+    return str(n)
+
+
+def _activity_start(v):
+    """YYYY-MM-DDTHH:MM from a Garmin timestamp string, or None.
+
+    Handles both the space-separated ("2026-09-22 07:14:33", what
+    startTimeLocal/startTimeGMT actually look like — probed 2026-09-24) and
+    T-separated shapes by normalising the separator before slicing. Also
+    idempotent on an already-normalised 16-char string (a re-whitelist pass
+    over a cached row), and degrades gracefully on a shorter legacy `date`
+    field (see _load_cache's legacy migration) rather than padding it.
+    """
+    if not isinstance(v, str):
+        return None
+    return _clip(v.replace(" ", "T", 1), 16)
+
+
+def _activity_pace_speed(type_key, duration_min, distance_km):
+    """(paceSecPerKm, speedKmh) — at most one non-None, per Q6.
+
+    Derived from duration/distance rather than the raw averageSpeed field:
+    mathematically the same number for a steady effort, and it means this
+    still works when build_activity is re-run over an already-built row
+    that never carried averageSpeed in the first place (amendment 4).
+    """
+    if not isinstance(type_key, str) or not duration_min or not distance_km:
+        return None, None
+    tk = type_key.lower()
+    if any(h in tk for h in _PACE_TYPE_HINTS):
+        return round(duration_min * 60 / distance_km), None
+    if any(h in tk for h in _SPEED_TYPE_HINTS):
+        return None, round(distance_km / (duration_min / 60), 1)
+    return None, None
+
+
+def _activity_has_content(raw):
+    """A type or a start, in either the raw or already-built spelling —
+    otherwise the row is noise (v0.5 A3)."""
+    type_key = _get(raw, "activityType", "typeKey") or raw.get("type")
+    start = _dual(raw, "startTimeLocal", "start")
+    gmt = raw.get("startTimeGMT")
+    return bool(type_key) or isinstance(start, str) or isinstance(gmt, str)
+
+
+def _activity_sort_key(raw):
+    """startTimeGMT descending, None-safe (v0.5 amendment 3): missing sorts
+    last. Only the raw shape carries startTimeGMT at all — an already-built
+    row (a cache re-whitelist pass) has none, so every such row gets the
+    same "" key and Python's stable sort leaves them in whatever order they
+    were already in, which is the order they were built in."""
+    v = raw.get("startTimeGMT")
+    return v if isinstance(v, str) else ""
+
+
+def build_activity(raw, *, activity_names=True):
+    """One whitelisted activity row, or None if `raw` isn't a dict.
+
+    Ten fields survive from a raw activity dict that also carries start
+    coordinates, activity/device/owner ids, the owner's real name, profile
+    image URLs, a location name, a timezone id and split summaries — none
+    of that reaches this return value, by omission rather than by naming it
+    out. `paceSecPerKm`/`speedKmh` are two more, beyond A2's own ten (Q6) —
+    logged in docs/implementation-notes-v5.md since there is no QML detail
+    page yet to consume them.
+
+    `date` (bare YYYY-MM-DD) is still emitted alongside `start`
+    (YYYY-MM-DDTHH:MM) per amendment 8: the existing card's QML reads
+    `lastActivity.date` and is untouched by this pass, so the field it
+    reads must keep existing until whichever change makes it read `start`
+    instead.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    activity_id = _activity_id(_dual(raw, "activityId", "id"))
+
+    type_key = _get(raw, "activityType", "typeKey")
+    if type_key is None:
+        type_key = raw.get("type")
+    type_key = _clip(type_key) if isinstance(type_key, str) else None
+
+    name = _dual(raw, "activityName", "name")
+    if activity_names and isinstance(name, str) and name.strip():
+        name = _clip(name, ACTIVITY_NAME_CLIP)
+    else:
+        name = None
+
+    start = _activity_start(_dual(raw, "startTimeLocal", "start"))
+    date = start[:10] if start else None
+
+    if "duration" in raw:
+        duration_min = _minutes(raw.get("duration"))
+    else:
+        duration_min = _round(raw.get("durationMin"))
+
+    if "distance" in raw:
+        n = _num(raw.get("distance"))
+        distance_km = round(n / 1000, 2) if n else None
+    else:
+        n = _num(raw.get("distanceKm"))
+        distance_km = round(n, 2) if n is not None else None
+
+    avg_hr = _round(_dual(raw, "averageHR", "avgHr"))
+    max_hr = _round(_dual(raw, "maxHR", "maxHr"))
+    kcal = _round(_dual(raw, "calories", "kcal"))
+    elev_val = raw.get("elevationGain") if "elevationGain" in raw else raw.get("elevM")
+    elev_n = _num(elev_val)
+    elev_m = _round(elev_n) if elev_n else None
+
+    pace, speed = _activity_pace_speed(type_key, duration_min, distance_km)
+
     return {
-        "type": _clip(type_key),
-        "durationMin": round(dur / 60) if dur else None,
-        "distanceKm": round(dist / 1000, 2) if dist else None,
-        "date": _clip(start.split(" ")[0].split("T")[0]) if isinstance(start, str) else None,
+        "id": activity_id,
+        "type": type_key,
+        "name": name,
+        "start": start,
+        "date": date,
+        "durationMin": duration_min,
+        "distanceKm": distance_km,
+        "avgHr": avg_hr,
+        "maxHr": max_hr,
+        "kcal": kcal,
+        "elevM": elev_m,
+        "paceSecPerKm": pace,
+        "speedKmh": speed,
     }
+
+
+def build_activities(raw, *, activity_names=True):
+    """Newest-first (by startTimeGMT), whitelisted, capped at ACTIVITY_ROWS.
+
+    Accepts a bare list or a {"activityList": [...]} dict — the same two
+    shapes garminconnect's own get_last_activity handles (A3). Anything
+    else is the caller's problem (_fetch_extras treats it as FAILED, per
+    amendment 5) — by the time `raw` gets here it is already known-good, or
+    this returns [] harmlessly either way. Sliced to ACTIVITY_ROWS *before*
+    building, so a hostile 10,000-entry response costs ACTIVITY_ROWS builds,
+    not 10,000 (amendment 4's cap test).
+    """
+    if isinstance(raw, dict):
+        raw = raw.get("activityList")
+    if not isinstance(raw, list):
+        return []
+    entries = [r for r in raw if isinstance(r, dict) and _activity_has_content(r)]
+    entries.sort(key=_activity_sort_key, reverse=True)
+    return [build_activity(r, activity_names=activity_names) for r in entries[:ACTIVITY_ROWS]]
 
 
 def build_floors(summary):
@@ -419,7 +596,7 @@ def build_calories(summary):
     return {"total": total, "active": active}
 
 
-def build_payload(summary, sleep, as_of, extras=None):
+def build_payload(summary, sleep, as_of, extras=None, activity_names=True):
     dto = _get(sleep, "dailySleepDTO") or {}
     secs = dto.get("sleepTimeSeconds")
     extras = extras or {}
@@ -446,7 +623,9 @@ def build_payload(summary, sleep, as_of, extras=None):
     payload["intensityMinutes"] = build_intensity(extras.get("intensityMinutes"))
     payload["floors"] = build_floors(summary)
     payload["calories"] = build_calories(summary)
-    payload["lastActivity"] = build_last_activity(extras.get("lastActivity"))
+    payload["activities"] = build_activities(extras.get("activities"),
+                                             activity_names=activity_names)
+    payload["lastActivity"] = payload["activities"][0] if payload["activities"] else None
     return payload
 
 
@@ -463,7 +642,26 @@ FAILED = object()
 # own keys) since that's what cmd_fetch substitutes into. `curve` is
 # deliberately absent — an intraday series is day-bound; yesterday's curve
 # under today's label would be a lie even when marked stale.
-CARRY_KEYS = ("hrvStatus", "readiness", "intensityMinutes")
+CARRY_KEYS = ("hrvStatus", "readiness", "intensityMinutes", "activities")
+
+
+def _activities_or_failed(fn):
+    """FAILED unless the call answers with a list, or a dict carrying an
+    activityList list (v0.5 amendment 5). A raised call is FAILED as usual;
+    a call that *answers* with None, {}, or some other shape is now FAILED
+    too — "answered with nothing" and "didn't answer at all" are different
+    endpoints (garminconnect returning None for a day with no activities)
+    and only the second is eligible to carry the cache forward. A genuine
+    empty list stays [] and is not carried.
+    """
+    v = _safe(fn)
+    if v is FAILED:
+        return FAILED
+    if isinstance(v, list):
+        return v
+    if isinstance(v, dict) and isinstance(v.get("activityList"), list):
+        return v
+    return FAILED
 
 
 def _safe(fn):
@@ -498,7 +696,7 @@ def _fetch_extras(g, today, skip_body_battery=False):
         "hrvStatus": _safe(lambda: g.get_hrv_data(today)),
         "readiness": _safe(lambda: g.get_training_readiness(today)),
         "intensityMinutes": _safe(lambda: g.get_intensity_minutes_data(today)),
-        "lastActivity": _safe(lambda: g.get_last_activity()),
+        "activities": _activities_or_failed(lambda: g.get_activities(0, ACTIVITY_LIMIT)),
     }
     failed = {k for k, v in raw.items() if v is FAILED}
     extras = {k: (None if v is FAILED else v) for k, v in raw.items()}
@@ -577,7 +775,29 @@ def _load_cache():
     cached = _clip_strings(cached)
     if isinstance(hint, str) and hint in SAFE_HINTS:
         cached["hint"] = hint
+    if isinstance(cached.get("activities"), list):
+        # v0.5 amendment 4: a cached activities list is re-run through the
+        # whitelist + cap on every load, not just at fetch time — this is
+        # the one place both the stale-cache-serving branch (above, in
+        # cmd_fetch) and the carry-forward branch go through, so a hand-
+        # edited last.json (extra keys planted onto an entry, or a
+        # 10,000-row list) can't smuggle anything past either path. A pre-
+        # v0.5 row (bare "date", no "start") is migrated first so it still
+        # sorts and displays instead of being silently dropped.
+        cached["activities"] = build_activities(
+            [_migrate_legacy_activity(e) for e in cached["activities"]])
     return cached
+
+
+def _migrate_legacy_activity(entry):
+    """A 0.4-and-earlier activity/lastActivity dict has `date` but no
+    `start` — hand it a `start` too so build_activity's lookup finds it.
+    `date` alone is only 10 characters (no time-of-day), so the derived
+    `start` is short; that degrades gracefully (still sorts, still shows a
+    day) rather than fabricating a time that was never recorded."""
+    if isinstance(entry, dict) and "start" not in entry and isinstance(entry.get("date"), str):
+        return dict(entry, start=entry["date"])
+    return entry
 
 def cmd_fetch(week=False) -> int:
     """Today's payload, plus the trailing week of history.
@@ -618,7 +838,9 @@ def cmd_fetch(week=False) -> int:
                 if bb is FAILED:
                     bb = None
             extras["bodyBattery"] = bb
-        payload = build_payload(summary, sleep, now, extras)
+        activity_names = _read_prefs().get("activityNames", True)
+        payload = build_payload(summary, sleep, now, extras,
+                                activity_names=activity_names)
         # Per-domain freshness (v0.5 A5): a secondary endpoint that *raised*
         # keeps its last cached value (marked in `carried`) instead of
         # blanking its card — but only for keys in CARRY_KEYS; an endpoint
@@ -635,6 +857,12 @@ def cmd_fetch(week=False) -> int:
                 if cached_value is not None:
                     payload[key] = cached_value
                 carried.append(key)
+            if "activities" in carried:
+                # lastActivity follows activities rather than being carried
+                # itself (A3/A5) — recompute it from whatever activities
+                # ended up in the payload, carried or not.
+                payload["lastActivity"] = (payload["activities"][0]
+                                           if payload["activities"] else None)
         payload["carried"] = carried
     except gc.GarminConnectAuthenticationError:
         return emit({"ok": False, "error": "auth-expired",
@@ -1049,6 +1277,14 @@ def _read_prefs():
         cleaned_bar = _clean_bar_metric(bar)
         if cleaned_bar:
             out["barMetric"] = cleaned_bar
+    # v0.5 Q3: an off-switch for activity names, for anyone who doesn't want
+    # a city-shaped Garmin auto-name riding in last.json. Default on
+    # (build_payload's own default), applied inside build_activity so
+    # cmd_fetch reads this once and threads it through — the builders
+    # themselves stay pure and disk-free.
+    names = data.get("activityNames")
+    if isinstance(names, bool):
+        out["activityNames"] = names
     return out
 
 
@@ -1076,6 +1312,10 @@ def cmd_prefs(argv) -> int:
         if cleaned_bar is None:
             return _invalid_pref()
         prefs["barMetric"] = cleaned_bar
+    elif key == "activityNames":
+        if value not in ("true", "false"):
+            return _invalid_pref()
+        prefs["activityNames"] = (value == "true")
     else:
         return _invalid_pref()
 

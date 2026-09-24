@@ -332,7 +332,8 @@ be able to reach it on a fresh install. If you'd rather track newer releases,
 calls this plugin makes — `Garmin()`, `login()`, `get_user_summary()`,
 `get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
 `get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
-`get_last_activity()` for today, and the ranged `get_daily_steps()`,
+`get_activities(0, 20)` (replaces the old `get_last_activity()` one call for
+one — same endpoint, a bigger limit), and the ranged `get_daily_steps()`,
 `get_rhr_daily()`, `get_sleep_daily()`, `get_body_battery(start, end)`,
 `get_hrv_data_range()`, `get_calories_daily()` plus one raw `connectapi()`
 call to the daily stress summary for the week — have been stable for a long

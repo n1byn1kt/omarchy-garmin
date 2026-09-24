@@ -13,7 +13,7 @@ def _all_endpoints(fake):
     fake.hrv = fixtures.HRV
     fake.readiness = fixtures.READINESS
     fake.intensity = fixtures.INTENSITY
-    fake.last_activity = fixtures.LAST_ACTIVITY
+    fake.activities = fixtures.ACTIVITIES
 
 
 def _fetch(mod, capsys):
@@ -33,8 +33,11 @@ def test_extra_metrics_from_real_shapes(home, fake_garmin, capsys):
                                 "status": "BALANCED"}
     assert out["readiness"] == {"score": 54, "level": "MODERATE"}
     assert out["intensityMinutes"] == {"weekly": 21, "goal": 150}
-    assert out["lastActivity"] == {"type": "hiking", "durationMin": 107,
-                                   "distanceKm": 12.0, "date": "2026-01-15"}
+    # activities[0] (newest by startTimeGMT) is the "Morning Run" entry.
+    last = out["lastActivity"]
+    assert (last["id"], last["type"], last["name"]) == ("10000000001", "running", "Morning Run")
+    assert (last["durationMin"], last["distanceKm"]) == (52, 8.41)
+    assert last["date"] == fixtures.day(1)
 
 
 # --- readiness: pick the newest scored reading, not readiness[0] ------------
@@ -68,16 +71,29 @@ def test_readiness_newest_with_null_score_falls_back_to_older_scored(home, fake_
     assert out["readiness"] == {"score": 40, "level": "LOW"}
 
 
+ACTIVITY_KEYS = {"id", "type", "name", "start", "date", "durationMin",
+                 "distanceKm", "avgHr", "maxHr", "kcal", "elevM",
+                 "paceSecPerKm", "speedKmh"}
+FORBIDDEN_ACTIVITY_KEYS = {"startLatitude", "startLongitude", "endLatitude",
+                           "endLongitude", "locationName", "ownerId",
+                           "ownerDisplayName", "ownerFullName", "deviceId",
+                           "timeZoneId", "hasPolyline", "splitSummaries",
+                           "activityUUID", "activityId", "activityName",
+                           "activityType", "startTimeLocal", "startTimeGMT"}
+
+
 def test_last_activity_carries_no_coordinates_or_ids(home, fake_garmin, capsys):
+    """v0.5 amendment 8: `id` is now expected (a decimal string); the
+    coordinates, owner and device fields fixtures.ACTIVITIES also carries
+    must still never reach the payload."""
     _all_endpoints(fake_garmin)
-    fake_garmin.last_activity = dict(fixtures.LAST_ACTIVITY,
-                                     startLatitude=12.34, startLongitude=-56.78,
-                                     activityId=99999999999, ownerFullName="Someone")
     out = _fetch(load_helper(), capsys)
-    assert set(out["lastActivity"]) == {"type", "durationMin", "distanceKm", "date"}
+    assert set(out["lastActivity"]) == ACTIVITY_KEYS
+    assert out["lastActivity"]["id"] == "10000000001"
     blob = json.dumps(out)
-    assert "12.34" not in blob and "ownerFullName" not in blob
-    assert "99999999999" not in blob
+    for forbidden in FORBIDDEN_ACTIVITY_KEYS:
+        assert forbidden not in blob, forbidden
+    assert "Demo User" not in blob and "Nowhereville" not in blob
 
 
 def test_floors_and_calories_come_from_the_existing_summary(home, fake_garmin, capsys):
@@ -119,7 +135,7 @@ def test_every_secondary_endpoint_failing_still_yields_ok_fetch(home, fake_garmi
     fake_garmin.exc = {name: RuntimeError("boom") for name in (
         "get_body_battery", "get_stress_data", "get_hrv_data",
         "get_training_readiness", "get_intensity_minutes_data",
-        "get_last_activity")}
+        "get_activities")}
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True and out["stale"] is False
     assert out["restingHr"] == 52
@@ -140,13 +156,14 @@ def test_malformed_endpoint_payloads_do_not_crash(home, fake_garmin, capsys):
     fake_garmin.hrv = "not a dict"
     fake_garmin.readiness = []
     fake_garmin.intensity = [1, 2, 3]
-    fake_garmin.last_activity = {"activityType": None, "duration": "x"}
+    fake_garmin.activities = {"activityType": None, "duration": "x"}  # neither shape
     fake_garmin.body_battery = [{"bodyBatteryValuesArray": "nope"}]
     fake_garmin.stress = {"stressValuesArray": [None, [1], {}]}
     out = _fetch(load_helper(), capsys)
     assert out["ok"] is True
     assert out["hrvStatus"] is None and out["readiness"] is None
     assert out["intensityMinutes"] is None and out["curve"] is None
+    assert out["activities"] == [] and out["lastActivity"] is None
 
 
 # --- day curves --------------------------------------------------------------
