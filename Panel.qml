@@ -1084,6 +1084,12 @@ Panel {
 
   function openDetail(token) {
     token = String(token || "")
+    // `activity:<id>` (IPC only) opens the list and then that activity's
+    // page. The id must look like one — digits, 1–19 of them — and must be a
+    // row we actually have; anything else just opens the list.
+    var wanted = ""
+    var m = token.match(/^activity:([0-9]{1,19})$/)
+    if (m) { token = "activity"; wanted = m[1] }
     if (!root.expandable(token)) return
     // The curve slot draws the battery card when there is no curve; the
     // detail follows what is on screen, not the token.
@@ -1093,11 +1099,25 @@ Panel {
     // list's key handling still live under a page that is not showing it.
     root.editMode = false
     root.activityCursor = 0
+    root.closeActivity()
     root.detailToken = token
+    if (wanted !== "") {
+      for (var i = 0; i < root.activities.length; i++)
+        if (root.activities[i].id === wanted) { root.activityCursor = i; root.openActivity(i); break }
+    }
   }
-  function closeDetail() { root.detailToken = "" }
+  function closeDetail() { root.closeActivity(); root.detailToken = "" }
   // A reopened panel starts on the deck, not on whatever was last inspected.
-  onOpenedChanged: if (!root.opened) root.detailToken = ""
+  onOpenedChanged: if (!root.opened) root.closeDetail()
+
+  // One back step, shared by Escape and the hero's arrow: activity page →
+  // list → deck → (edit mode →) closed.
+  function goBack() {
+    if (root.activityDetailOpen) root.closeActivity()
+    else if (root.detailMode) root.closeDetail()
+    else if (root.editMode) root.endEdit()
+    else root.close()
+  }
 
   // ---- Activity list page
   //
@@ -1177,6 +1197,101 @@ Panel {
     var parts = ["this week " + n, root.fmtDuration(mins)]
     if (km > 0) parts.push(km.toFixed(1) + " km")
     return parts.join(" · ")
+  }
+
+  // ---- Activity detail page
+  //
+  // The open activity is remembered by id when it has one, so a refresh that
+  // pushes a new activity onto the top of the list keeps showing the same
+  // one rather than whatever now sits at that index. A row without an id
+  // (the helper nulls a malformed one) falls back to its index.
+  property string activityOpenId: ""
+  property int activityOpenIndex: -1
+  readonly property var activityOpen: {
+    if (root.activityOpenId !== "") {
+      for (var i = 0; i < root.activities.length; i++)
+        if (root.activities[i].id === root.activityOpenId) return root.activities[i]
+      return null
+    }
+    return root.activityOpenIndex >= 0 && root.activityOpenIndex < root.activities.length
+      ? root.activities[root.activityOpenIndex] : null
+  }
+  readonly property bool activityDetailOpen: root.activityPage && root.activityOpen !== null
+
+  function openActivity(index) {
+    var a = root.activities[index]
+    if (!a) return
+    root.connectFailed = false
+    root.activityOpenIndex = index
+    root.activityOpenId = typeof a.id === "string" && /^[0-9]{1,19}$/.test(a.id) ? a.id : ""
+  }
+  function closeActivity() {
+    root.activityOpenId = ""
+    root.activityOpenIndex = -1
+    root.connectFailed = false
+  }
+
+  // Pace and speed are precomputed by the helper, per activity family (pace
+  // for run/walk/hike, speed for cycling, neither otherwise); this only
+  // formats whichever one arrived.
+  function fmtPace(secPerKm) {
+    var n = root.num(secPerKm)
+    if (n === null || n <= 0) return ""
+    var t = Math.round(n)
+    return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0") + " /km"
+  }
+
+  readonly property var activityDetail: {
+    var a = root.activityOpen
+    if (!a) return { "glyph": "", "title": "", "subtitle": "", "metrics": [], "linkable": false }
+    var metrics = []
+    function add(label, value) { if (value !== "") metrics.push({ "label": label, "value": value }) }
+    var mins = root.num(a.durationMin)
+    add("Duration", mins === null ? "" : root.fmtDuration(mins))
+    add("Distance", root.fmtKm(a.distanceKm))
+    add("Pace", root.fmtPace(a.paceSecPerKm))
+    var kmh = root.num(a.speedKmh)
+    add("Speed", kmh === null || kmh <= 0 ? "" : kmh.toFixed(1) + " km/h")
+    var avg = root.num(a.avgHr), max = root.num(a.maxHr)
+    add("Avg HR", avg === null ? "" : root.fmtNumber(avg) + " bpm")
+    add("Max HR", max === null ? "" : root.fmtNumber(max) + " bpm")
+    var kcal = root.num(a.kcal)
+    add("Calories", kcal === null ? "" : root.fmtSteps(kcal) + " kcal")
+    var elev = root.num(a.elevM)
+    add("Elevation", elev === null ? "" : root.fmtSteps(elev) + " m")
+
+    var title = root.activityTitle(a)
+    var type = root.titleCase(a.type)
+    var day = root.activityDay(a)
+    var clock = root.activityClock(a)
+    var sub = []
+    if (type !== "" && type !== title) sub.push(type)
+    if (day) sub.push(root.weekdayNames[day.getDay()] + " " + root.activityDate(a))
+    if (clock !== "") sub.push(clock)
+    return {
+      "glyph": root.typeGlyph(a.type),
+      "title": title,
+      "subtitle": sub.length > 0 ? sub.join(" · ") : "date unknown",
+      "metrics": metrics,
+      // The ids are fabricated in demo mode; a link to someone else's
+      // activity (or a 404) is worse than no button.
+      "linkable": typeof a.id === "string" && /^[0-9]{1,19}$/.test(a.id) && !root.payloadDemo
+    }
+  }
+
+  readonly property bool payloadDemo: !!root.payload && root.payload.demo === true
+  property bool connectFailed: false
+
+  // The one place the panel hands anything to the desktop's URL opener
+  // (tests/test_hardening.py checks there is exactly one). The prefix is a
+  // literal and the id must be 1–19 decimal digits, tested on the string the
+  // helper emitted — never Number(id), which would round a 19-digit id to
+  // the nearest double and open somebody else's activity. Nothing else from
+  // the payload can reach the URL.
+  function openInConnect(id) {
+    if (typeof id !== "string" || !/^[0-9]{1,19}$/.test(id)) return
+    if (root.payloadDemo) return
+    root.connectFailed = !Qt.openUrlExternally("https://connect.garmin.com/modern/activity/" + id)
   }
 
   readonly property string activityListHeading: {
@@ -1643,16 +1758,28 @@ Panel {
       // Escape leaves edit mode first and only closes the panel on a second
       // press — the same shape every modal editor has, and the alternative
       // (panel vanishes mid-rearrange) loses the user their place.
-      onCloseRequested: root.detailMode ? root.closeDetail() : root.editMode ? root.endEdit() : root.close()
+      onCloseRequested: root.goBack()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       // The activity list's cursor is checked first: openDetail clears edit
       // mode, so the two never overlap, but the order makes that impossible
       // to get wrong from here.
+      // →/l opens the cursored row and ←/h steps back out, so the whole
+      // list-and-page loop works from the home row.
       onMoveRequested: function(dx, dy) {
-        if (root.activityPage) { if (dy !== 0) root.activityMove(dy) }
+        if (root.activityDetailOpen) { if (dx < 0) root.closeActivity() }
+        else if (root.activityPage) {
+          if (dy !== 0) root.activityMove(dy)
+          else if (dx > 0) root.openActivity(root.activityCursor)
+        }
         else if (root.editMode) root.editMove(dx, dy)
       }
-      onActivateRequested: if (!root.activityPage && root.editMode) root.editActivate()
+      // Enter on an activity page opens the row; it never opens the browser —
+      // leaving the desktop is a click on a labelled button, not a keypress
+      // that one more Enter than intended could fire.
+      onActivateRequested: {
+        if (root.activityPage) { if (!root.activityDetailOpen) root.openActivity(root.activityCursor) }
+        else if (root.editMode) root.editActivate()
+      }
       onTextKey: function(t) {
         if (root.detailMode) {
           // The week view is read-only; refresh still works, edit does not.
@@ -1677,7 +1804,8 @@ Panel {
         PanelHero {
           width: parent.width
           title: "Garmin"
-          meta: root.activityPage ? "Recent activities"
+          meta: root.activityDetailOpen ? "Activity"
+              : root.activityPage ? "Recent activities"
               : root.detailMode ? root.detail.title + " · last 7 days"
               : root.editMode ? "Editing cards" : root.heroMeta
           foreground: root.foreground
@@ -1694,7 +1822,7 @@ Panel {
               hoverColor: root.foreground
               fontFamily: root.fontFamily
               bordered: true
-              onClicked: root.detailMode ? root.closeDetail() : root.toggleEdit()
+              onClicked: root.detailMode ? root.goBack() : root.toggleEdit()
             }
           }
           iconComponent: Component {
@@ -2067,7 +2195,7 @@ Panel {
           }
 
           ActivityList {
-            visible: root.activityPage
+            visible: root.activityPage && !root.activityDetailOpen
             width: parent.width
             rows: root.activityListRows
             cursor: root.activityCursor
@@ -2079,12 +2207,32 @@ Panel {
             fontFamily: root.fontFamily
             muted: root.showStale || root.isCarried("activity")
             onHovered: function(index) { root.activityCursor = index }
+            onActivated: function(index) { root.activityCursor = index; root.openActivity(index) }
+          }
+
+          ActivityDetail {
+            visible: root.activityDetailOpen
+            width: parent.width
+            glyph: root.activityDetail.glyph
+            title: root.activityDetail.title
+            subtitle: root.activityDetail.subtitle
+            metrics: root.activityDetail.metrics
+            linkable: root.activityDetail.linkable
+            failed: root.connectFailed
+            foreground: root.foreground
+            accentColor: root.accentColor
+            urgentColor: root.urgentColor
+            dim: root.dim
+            fontFamily: root.fontFamily
+            muted: root.showStale || root.isCarried("activity")
+            onOpenRequested: root.openInConnect(root.activityOpen ? root.activityOpen.id : "")
           }
 
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: root.activityPage ? "↑↓ choose · Esc or the arrow to go back"
+            text: root.activityDetailOpen ? "Esc or the arrow to go back to the list"
+                : root.activityPage ? "↑↓ choose · Enter open · Esc or the arrow to go back"
                                     : "Hover a day for detail · Esc or the arrow to go back"
             color: root.dim
             opacity: 0.7

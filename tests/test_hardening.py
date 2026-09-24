@@ -307,6 +307,34 @@ def test_every_qml_text_element_is_plaintext():
                 assert "Text.PlainText" in block, f"{qml.name}:{i + 1} lacks textFormat"
 
 
+def test_connect_link_is_opened_from_one_guarded_site():
+    """Qt.openUrlExternally hands a URL to the desktop. The plugin calls it
+    exactly once, in Panel.openInConnect, and that function refuses anything
+    but a 1-19 digit *string* id (never Number(id)) before building the URL
+    from a literal prefix."""
+    import pathlib, re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    sources = {q.name: q.read_text() for q in root.glob("*.qml")}
+    calls = [(n, src.count("openUrlExternally")) for n, src in sources.items()
+             if "openUrlExternally" in src]
+    assert calls == [("Panel.qml", 1)], calls
+    hosts = sum(src.count("connect.garmin.com") for src in sources.values())
+    assert hosts == 1
+
+    panel = sources["Panel.qml"]
+    body = panel.split("function openInConnect(id) {", 1)[1].split("\n  }\n", 1)[0]
+    guard = 'if (typeof id !== "string" || !/^[0-9]{1,19}$/.test(id)) return'
+    assert guard in body
+    call = 'Qt.openUrlExternally("https://connect.garmin.com/modern/activity/" + id)'
+    assert call in body
+    # The guard runs before the call, and nothing reassigns id in between.
+    assert body.index(guard) < body.index(call)
+    assert not re.search(r"\bid\s*=[^=]", body)
+    assert "Number(" not in body
+    # Demo payloads never open a link (the ids are fabricated).
+    assert "root.payloadDemo" in body.split(call, 1)[0]
+
+
 def test_carried_token_map_is_single_and_matches_carry_keys():
     """`carried` holds payload keys; cards are named by tokens. Panel.qml maps
     one to the other in exactly one literal, and that literal must cover the
