@@ -321,8 +321,16 @@ Item {
     // The user's command line is passed via argv ($1), never spliced into the
     // wrapper source below — a value containing `}; anything; {` cannot escape
     // the parsed script this way, so the head -c cap always bounds output.
+    //
+    // `timeout` runs the command in its own process group and signals the
+    // whole group, so a hung script and everything it forked is gone at 9s.
+    // Stopping this Process only kills the outer bash; before, a stuck command
+    // survived its watchdog and every poll could leave another one behind.
+    // The watchdog below stays as the backstop. 124 is timeout's own exit
+    // code, re-raised past head so onExited can tell a timeout from a failure.
     customProcess.command = ["bash", "-c",
-      "bash -c \"$1\" | head -c 8193", "garmin-custom", String(root.customCommand)]
+      "timeout -k 1 9 bash -c \"$1\" | head -c 8193; [ \"${PIPESTATUS[0]}\" = 124 ] && exit 124; exit 0",
+      "garmin-custom", String(root.customCommand)]
     customProcess.running = true
     customWatchdog.restart()
   }
@@ -435,23 +443,32 @@ Item {
       customWatchdog.stop()
       customWatchdog.tripped = false
       if (timedOut) return
+      // 124 is timeout's own code, re-raised by the wrapper — but a command can
+      // also exit 124 by itself. The output stays the verdict: only an empty
+      // result is read as a hang; anything printed is judged as usual.
+      var out = String(customStdout.text || root._customOut || "")
+      if (exitCode === 124 && out.trim() === "") {
+        root.customFail("command timed out after 9s")
+        return
+      }
       // No exit-code gate: what the command printed is the verdict, and the
       // status of a pipeline ending in `head` is not the command's own. The
       // code is passed along only so a failure message can mention it.
-      root.applyCustom(String(customStdout.text || root._customOut || ""), exitCode)
+      root.applyCustom(out, exitCode)
     }
   }
 
   Timer {
     id: customWatchdog
     property bool tripped: false
-    interval: 10000
+    // Past timeout's 9s + 1s kill grace, so it only fires if timeout itself hangs.
+    interval: 12000
     repeat: false
     onTriggered: {
       if (!customProcess.running) return
       customWatchdog.tripped = true
       customProcess.running = false
-      root.customFail("command timed out after 10s")
+      root.customFail("command timed out")
     }
   }
 

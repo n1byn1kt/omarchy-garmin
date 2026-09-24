@@ -120,7 +120,7 @@ def test_deps_hint_is_venv_install_for_fetch_and_login(home, monkeypatch, capsys
     assert out["hint"] == mod.DEPS_HINT
     assert out["hint"] == (
         "python3 -m venv ~/.local/share/garmin-widget/venv && "
-        "~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11"
+        "~/.local/share/garmin-widget/venv/bin/pip install --require-hashes -r ~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/requirements.txt"
     )
     # Panel.qml carries the same string as its fallback for payloads that
     # arrive without a hint. The two must stay byte-identical or the panel

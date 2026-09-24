@@ -2,16 +2,25 @@
   "schemaVersion": 1,
   "id": "io.github.n1byn1kt.garmin",
   "name": "Garmin",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": "n1byn1kt",
   "license": "MIT",
-  "description": "Your Garmin day in the bar: a configurable metric chip (Body Battery, steps, sleep, or readiness) and a panel of customizable cards — day curve, sleep, steps, readiness, HRV, and more.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "description": "Your Garmin day in the bar: a configurable metric chip (Body Battery, steps, sleep, or readiness) and a panel of customizable cards \u2014 day curve, sleep, steps, readiness, HRV, and more.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
   "barWidget": {
     "displayName": "Garmin",
-    "description": "Health chip — Body Battery, steps, sleep or readiness; click for the full panel",
+    "description": "Health chip \u2014 Body Battery, steps, sleep or readiness; click for the full panel",
     "category": "Health",
+    "aliases": [
+      "garmin",
+      "body-battery",
+      "health"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
@@ -23,12 +32,58 @@
       "customCommand": ""
     },
     "schema": [
-      { "key": "pollMinutes", "type": "number", "label": "Refresh interval (minutes)" },
-      { "key": "barMetric", "type": "string", "label": "Bar metric: bodyBattery, steps, sleep or readiness (default bodyBattery; the panel's edit mode overrides this)" },
-      { "key": "showSteps", "type": "boolean", "label": "Show steps next to the bar metric (ignored when the bar metric is steps)" },
-      { "key": "stepsGoalFallback", "type": "number", "label": "Step goal if Garmin doesn't provide one" },
-      { "key": "panelMetrics", "type": "string", "label": "Panel cards, comma-separated and in order: curve, battery, sleep, steps, readiness, rhr, hrv, intensity, floors, calories, activity, custom (the panel's edit mode overrides this)" },
-      { "key": "customCommand", "type": "string", "label": "Command for the 'custom' card — must print one JSON object: {title, value, caption, meter:{value,max}, tone}" }
+      {
+        "key": "pollMinutes",
+        "type": "integer",
+        "label": "Refresh interval (minutes)",
+        "min": 5,
+        "max": 240,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "barMetric",
+        "type": "enum",
+        "label": "Bar metric",
+        "options": [
+          "bodyBattery",
+          "steps",
+          "sleep",
+          "readiness"
+        ],
+        "defaultValue": "bodyBattery",
+        "description": "Shown on the bar chip. The panel's edit mode overrides this."
+      },
+      {
+        "key": "showSteps",
+        "type": "boolean",
+        "label": "Show steps next to the bar metric",
+        "defaultValue": false,
+        "description": "Ignored when the bar metric is steps."
+      },
+      {
+        "key": "stepsGoalFallback",
+        "type": "integer",
+        "label": "Step goal if Garmin doesn't provide one",
+        "min": 1000,
+        "max": 100000,
+        "step": 500,
+        "defaultValue": 10000
+      },
+      {
+        "key": "panelMetrics",
+        "type": "string",
+        "label": "Panel cards (comma-separated, in order)",
+        "defaultValue": "curve,sleep,steps,readiness,rhr",
+        "description": "Any of: curve, battery, sleep, steps, readiness, rhr, hrv, intensity, floors, calories, activity, custom. Order matters, so this stays a list rather than a multiselect. The panel's edit mode overrides this."
+      },
+      {
+        "key": "customCommand",
+        "type": "string",
+        "label": "Command for the 'custom' card",
+        "defaultValue": "",
+        "description": "Must print one JSON object: {title, value, caption, meter:{value,max}, tone}. Runs as you, 9s timeout, 8KB output cap."
+      }
     ]
   }
 }

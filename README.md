@@ -154,7 +154,7 @@ command** row on in edit mode (it only appears once a command is set). Turning
 that row off stops the command from running at all, not just from being drawn.
 
 The card is deliberately unable to hurt the rest of the widget. It runs in its
-own process with a **10-second timeout**, output over **8 KB** is ignored, and
+own process with a **9-second timeout**, output over **8 KB** is ignored, and
 anything that is not a well-formed object with a title and a value — garbage, a
 hang, valid JSON of the wrong shape — simply **hides the card** and puts the
 reason in the chip's tooltip, prefixed `custom card:`. What decides that is the
@@ -162,10 +162,12 @@ output, not the exit status: your command's own pipelines are none of the
 widget's business, so a command that prints a good card is drawn whatever it
 exits with, and a non-zero exit is only ever mentioned as extra detail on a
 message the output had already earned. The Garmin fetch, the chip's number and
-every other card carry on untouched. One caveat on
-the timeout: it kills the `bash -c` your command line runs in, and — that being
-how `bash -c` works — anything your command backgrounded or spawned into another
-process group is left running, so write commands that finish on their own.
+every other card carry on untouched. The timeout runs your command under
+`timeout`, which kills its whole process group — the command and everything it
+spawned. The one exception is a child that deliberately leaves the group
+(`setsid`, a daemonising `nohup … &`): that escapes, so write commands that
+finish on their own. A hang is reported as `command timed out after 9s` only
+when nothing was printed; partial output is judged like any other.
 
 Two things it is not: it is not a shell you should put secrets in (the command
 line sits in `shell.json` in plain text), and it is not a scheduler — a command
@@ -173,6 +175,22 @@ that takes seconds delays nothing, but it also does not get to run more often
 than the poll interval.
 
 ---
+
+## What's new in 0.4.1
+
+Hardening and housekeeping, no new cards:
+
+- **Hash-locked dependencies.** `requirements.txt` pins `garminconnect` and
+  every transitive package by SHA-256; the install one-liner (and the panel's
+  copy button) now uses `pip install --require-hashes`. Existing venvs keep
+  working — re-run the one-liner to switch to the locked set.
+- **Custom-card timeout kills the whole command.** A hung `customCommand` was
+  stopped only at its wrapper and could outlive the 10s watchdog, one more
+  orphan per poll. It now runs under `timeout`, which takes its entire process
+  tree down at 9s.
+- **Typed settings.** The manifest declares `barMetric` as an enum and the
+  numeric settings as bounded integers, plus search aliases — for Omarchy's
+  settings UI as it grows typed fields. `panelMetrics` stays an ordered list.
 
 ## What's new in 0.4.0
 
@@ -213,7 +231,7 @@ morning, and screenshots/docs got a refresh.
   matching settings.
 - **A card of your own.** `customCommand` runs anything that prints a small JSON
   object and shows it as a card — it runs as your own user (no sandbox), bounded
-  by a 10s timeout, an 8KB output cap and a defensive parser, so a broken script
+  by a 9s timeout (the command's whole process tree is killed), an 8KB output cap and a defensive parser, so a broken script
   costs you that card and nothing else.
 - **`prefs` subcommand.** `garmin-widget prefs get|set KEY VALUE` is the only
   writer of `prefs.json`; the panel calls it rather than touching disk itself.
@@ -260,10 +278,15 @@ this is the same one-liner the panel shows (and its copy button copies) when
 the dependency is missing:
 
 ```bash
-python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11
+python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install --require-hashes -r ~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/requirements.txt
 ```
 
-Verified against `garminconnect` **0.3.11**. Newer releases normally work — the
+`requirements.txt` pins `garminconnect` **0.3.11** *and every package it pulls
+in* (`curl_cffi`, `requests`, `urllib3`, `certifi`, …) by SHA-256, and
+`--require-hashes` makes pip refuse anything that doesn't match. This process
+holds your Garmin refresh token, so a compromised upstream release should not
+be able to reach it on a fresh install. If you'd rather track newer releases,
+`pip install garminconnect` into the same venv still works. Newer releases normally work — the
 calls this plugin makes — `Garmin()`, `login()`, `get_user_summary()`,
 `get_sleep_data()`, `get_body_battery()`, `get_stress_data()`,
 `get_hrv_data()`, `get_training_readiness()`, `get_intensity_minutes_data()`,
@@ -295,6 +318,10 @@ omarchy plugin add https://github.com/n1byn1kt/omarchy-garmin.git --enable
 Then install the dependency (see above) and connect your account (below).
 
 Updating later: `omarchy plugin update io.github.n1byn1kt.garmin`.
+
+Since Omarchy 4.0.4, `add`, `update` and `remove` ask for confirmation even
+when given arguments, and refuse outright without a terminal. From a script
+(or an agent), pass `--yes` — after you have read what it is about to install.
 
 ---
 
@@ -334,10 +361,10 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 
 | Setting | Type | Default | What it does |
 |---|---|---|---|
-| `pollMinutes` | number | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes**; `0` (or anything non-numeric) falls back to the 30-minute default instead of being floored — Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
-| `barMetric` | string | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
+| `pollMinutes` | integer | `30` | How often the helper asks Garmin for new data. **Floored at 5 minutes**; `0` (or anything non-numeric) falls back to the 30-minute default instead of being floored — Garmin's numbers move slowly and polling harder mostly buys you rate limits. |
+| `barMetric` | enum | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. the bolt glyph and `61` followed by `8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
-| `stepsGoalFallback` | number | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
+| `stepsGoalFallback` | integer | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
 | `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `customCommand` | string | `""` (off) | A command line whose stdout is one JSON object `{title, value, caption, meter:{value,max}, tone}`, rendered as the `custom` card. Empty means the card does not exist and nothing is ever run. See [Your own card](#your-own-card) for the contract and the safety rails. |
 

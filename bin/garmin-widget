@@ -153,8 +153,12 @@ def _read_json_guarded(path: Path, cap: int):
 def cmd_status() -> int:
     return emit({"ok": True, "deps": HAS_GARMINCONNECT, "tokens": TOKENS_PATH.exists()})
 
+# Hash-locked: every package, transitive ones included, is pinned by SHA-256
+# in requirements.txt, so a tampered PyPI release can't land in the process
+# that holds the OAuth refresh token. The plugin path is Omarchy's fixed
+# install location for this id.
 DEPS_HINT = ("python3 -m venv ~/.local/share/garmin-widget/venv && "
-             "~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11")
+             "~/.local/share/garmin-widget/venv/bin/pip install --require-hashes -r ~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/requirements.txt")
 
 def _venv_python() -> Path:
     return _home() / ".local" / "share" / "garmin-widget" / "venv" / "bin" / "python"

@@ -124,7 +124,7 @@ Panel {
   readonly property string depsCommand:
     root.service && String(root.service.lastHint || "") !== ""
       ? String(root.service.lastHint)
-      : "python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install garminconnect==0.3.11"
+      : "python3 -m venv ~/.local/share/garmin-widget/venv && ~/.local/share/garmin-widget/venv/bin/pip install --require-hashes -r ~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/requirements.txt"
 
   readonly property string guidanceTitle: {
     switch (root.svcState) {
