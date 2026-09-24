@@ -914,8 +914,8 @@ def _merge_row(date, layers):
     return row
 
 
-def _update_history(payload, today, window=None, burst=False):
-    """Merge cache, window and today's payload into the trailing week.
+def _merge_history(cached, fetched_on, payload, today, window=None, burst=False):
+    """Pure merge: cache + window + today's payload -> (rows, new fetched_on).
 
     Per date, per field: live today > window > cache, and only values move —
     a source that failed or had nothing for a day leaves the cached number
@@ -930,30 +930,43 @@ def _update_history(payload, today, window=None, burst=False):
     would leave the week stuck at whatever the cache already had until
     tomorrow; leaving it unset means the very next poll bursts again instead.
 
+    No I/O here — `cached` (a list of day dicts) and `fetched_on` are handed
+    in rather than read from history.json, so the same function can run
+    against an empty cache (a future demo mode) or against whatever
+    _load_history() actually returned.
+    """
+    dates = _window_dates(today)
+    by_date = {}
+    for e in cached:
+        if e.get("date") in dates:
+            by_date.setdefault(e["date"], []).append(e)
+    win = _window_rows(_dict(window))
+    live = _live_row(payload)
+    rows = []
+    for d in dates:
+        layers = list(by_date.get(d, []))
+        if d in win:
+            layers.append(win[d])
+        if d == today:
+            layers.append(live)
+        if not layers and d != today:
+            continue
+        rows.append(_merge_row(d, layers))
+    if burst and window:
+        fetched_on = today
+    return rows, fetched_on
+
+
+def _update_history(payload, today, window=None, burst=False):
+    """I/O wrapper around _merge_history: load, merge, write, return the rows.
+
     The payload keeps carrying a plain list; the {"windowFetchedOn", "days"}
     wrapper is the on-disk format only.
     """
     try:
-        dates = _window_dates(today)
         cached, fetched_on = _load_history()
-        by_date = {}
-        for e in cached:
-            if e.get("date") in dates:
-                by_date.setdefault(e["date"], []).append(e)
-        win = _window_rows(_dict(window))
-        live = _live_row(payload)
-        rows = []
-        for d in dates:
-            layers = list(by_date.get(d, []))
-            if d in win:
-                layers.append(win[d])
-            if d == today:
-                layers.append(live)
-            if not layers and d != today:
-                continue
-            rows.append(_merge_row(d, layers))
-        if burst and window:
-            fetched_on = today
+        rows, fetched_on = _merge_history(cached, fetched_on, payload, today,
+                                          window, burst)
         _atomic_write(HISTORY_PATH, {"windowFetchedOn": fetched_on,
                                      "days": rows}, ".history-")
         return rows
