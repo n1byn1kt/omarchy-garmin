@@ -75,7 +75,7 @@
         "type": "string",
         "label": "Panel cards (comma-separated, in order)",
         "defaultValue": "curve,sleep,steps,readiness,rhr",
-        "description": "Any of: curve, battery, sleep, steps, readiness, rhr, hrv, intensity, floors, calories, activity, custom. Order matters, so this stays a list rather than a multiselect. The panel's edit mode overrides this."
+        "description": "Any of: curve, battery, sleep, steps, readiness, rhr, hrv, intensity, floors, calories, weight, activity, custom. Order matters, so this stays a list rather than a multiselect. The panel's edit mode overrides this."
       },
       {
         "key": "customCommand",

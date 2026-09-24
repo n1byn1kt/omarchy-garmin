@@ -324,6 +324,9 @@ Panel {
   readonly property var intensityInfo: root.payload && root.payload.intensityMinutes ? root.payload.intensityMinutes : null
   readonly property var floorsInfo: root.payload && root.payload.floors ? root.payload.floors : null
   readonly property var caloriesInfo: root.payload && root.payload.calories ? root.payload.calories : null
+  // Null both when the endpoint failed and when the card is simply not in
+  // the effective deck (the helper never fetched it in that case either).
+  readonly property var weightInfo: root.payload && root.payload.weight ? root.payload.weight : null
   // The helper persists only as many activities as the list page can show
   // (ACTIVITY_ROWS in bin/garmin-widget), so every row here is reachable —
   // no "and N more" line pointing at rows nobody can open. The input cap is
@@ -358,7 +361,8 @@ Panel {
     "hrvStatus": "hrv",
     "intensityMinutes": "intensity",
     "activities": "activity",
-    "readiness": "readiness"
+    "readiness": "readiness",
+    "weight": "weight"
   })
   readonly property var carriedTokens: {
     var c = root.payload && root.payload.carried ? root.payload.carried : null
@@ -443,6 +447,63 @@ Panel {
   readonly property bool bbDrawn: root.bbPoints.length >= 2
   readonly property bool stressDrawn: root.stressPoints.length >= 2
   readonly property bool hasCurve: root.bbDrawn || root.stressDrawn
+
+  // ---- Weight (PR #1 port): a 30-day timeline, not a today-figure
+  //
+  // Reuses cleanSeries's [epochMs, value] validation, then drops non-positive
+  // readings the same way the helper's own _kg does — a planted or corrupted
+  // cache entry should cost a point, not draw a spike to zero.
+  readonly property var weightSeries: root.weightInfo && root.weightInfo.series ? root.weightInfo.series : null
+  readonly property var weightPoints: {
+    var raw = root.cleanSeries(root.weightSeries)
+    var out = []
+    for (var i = 0; i < raw.length; i++)
+      if (raw[i][1] > 0) out.push(raw[i])
+    return out
+  }
+  readonly property bool hasWeight:
+    root.num(root.weightInfo ? root.weightInfo.current : null) !== null
+  readonly property string weightUnit:
+    root.weightInfo && root.weightInfo.unit === "lb" ? "lb" : "kg"
+
+  function fmtWeight(n) {
+    var v = root.num(n)
+    return v === null ? "—" : v.toFixed(1) + " " + root.weightUnit
+  }
+
+  // Change against the previous weigh-in, not against yesterday: weigh-ins
+  // skip days as a matter of course, so the two-day gap rule the other
+  // deltas use would hide the actual trend. Prefer the helper's own `delta`
+  // (computed on the full series before downsampling); fall back to the two
+  // newest plotted points for an older cache that lacks the field. No
+  // colour on the arrow — weight going up is not an alarm for everyone.
+  readonly property var weightDelta: {
+    var diff = root.num(root.weightInfo ? root.weightInfo.delta : null)
+    if (diff === null) {
+      var s = root.weightPoints
+      if (s.length < 2) return { "glyph": "", "tone": "", "text": "" }
+      diff = Math.round((s[s.length - 1][1] - s[s.length - 2][1]) * 10) / 10
+    }
+    if (diff === 0) return { "glyph": "→", "tone": "", "text": "0.0 " + root.weightUnit }
+    var rose = diff > 0
+    var mag = Math.abs(diff).toFixed(1)
+    return {
+      "glyph": rose ? "↗" : "↘",
+      "tone": "",
+      "text": (rose ? "+" : "−") + mag + " " + root.weightUnit
+    }
+  }
+
+  readonly property string weightSpan: {
+    var start = root.fmtDay(root.weightInfo ? root.weightInfo.startDate : "")
+    var end = root.fmtDay(root.weightInfo ? root.weightInfo.date : "")
+    var span = (start !== "" && end !== "" && start !== end) ? start + "–" + end
+      : (end !== "" ? end : start)
+    var parts = []
+    if (span !== "") parts.push(span)
+    if (root.weightDelta.text !== "") parts.push(root.weightDelta.text)
+    return parts.join(" · ")
+  }
 
   // The last stress sample, for the days Garmin gives us a stress curve but
   // no Body Battery to head the card with.
@@ -699,9 +760,13 @@ Panel {
   // dropped instead of erroring — a typo should cost you one card, not the
   // whole panel — and a string that survives none of that falls back to the
   // default set rather than leaving the body empty.
+  // `weight` is deliberately not in defaultMetrics: fetching a 30-day
+  // weigh-in timeline for an account nobody asked to show it is exactly
+  // the opt-in the PR-port task called for — existing 0.4 layouts must not
+  // suddenly start pulling weight data on upgrade.
   readonly property var knownMetrics: [
     "curve", "battery", "sleep", "steps", "readiness",
-    "rhr", "hrv", "intensity", "floors", "calories", "activity", "custom"
+    "rhr", "hrv", "intensity", "floors", "calories", "weight", "activity", "custom"
   ]
   readonly property string defaultMetrics: "curve,sleep,steps,readiness,rhr"
 
@@ -712,7 +777,7 @@ Panel {
     "curve": "Day curve", "battery": "Body Battery", "sleep": "Sleep",
     "steps": "Steps", "readiness": "Training readiness", "rhr": "Resting HR",
     "hrv": "HRV", "intensity": "Intensity minutes", "floors": "Floors",
-    "calories": "Calories", "activity": "Last activity",
+    "calories": "Calories", "weight": "Weight", "activity": "Last activity",
     "custom": "Custom command"
   })
 
@@ -793,8 +858,10 @@ Panel {
       // Only `kind` is needed here, and it does not depend on density.
       var card = root.cardFor(token, false)
 
-      // The curve is a chart, not a figure: it always gets the full width.
-      if (card.kind === "curve") {
+      // Charts are not figures: the curve and the weight timeline always
+      // get the full width — pairing a plot with a figure would squeeze
+      // both past the point of being readable.
+      if (card.kind === "curve" || card.kind === "weight") {
         if (pending !== "") { rows.push([pending]); pending = "" }
         rows.push([token])
         continue
@@ -1037,6 +1104,23 @@ Panel {
         "title": dense ? "Activity" : "Last activity",
         "value": shown === "" ? "—" : shown,
         "caption": meta.join(" · ")
+      }
+    }
+    case "weight": {
+      // Not a today-figure: weigh-ins skip days as a matter of course, so
+      // an empty morning must not hide a month of real data, and emptyToday
+      // must not keep an empty card around either (hasWeight already
+      // covers the whole 30-day window, not just today).
+      var wd = root.weightDelta
+      return {
+        "kind": "weight",
+        "show": root.hasWeight,
+        "icon": "󰔻",  // nf-md-weight, U+F053B
+        "title": "Weight",
+        "value": root.fmtWeight(root.weightInfo ? root.weightInfo.current : null),
+        "delta": wd.glyph,
+        "deltaTone": wd.tone,
+        "caption": root.weightSpan
       }
     }
     case "custom": {
@@ -2049,6 +2133,7 @@ Panel {
 
                   readonly property var card: root.cardFor(cardSlot.modelData)
                   readonly property bool isCurve: cardSlot.card.kind === "curve"
+                  readonly property bool isWeight: cardSlot.card.kind === "weight"
 
                   // implicitHeight is what the layout measures; `height` is
                   // what it hands back, equalised across the row. Neither card
@@ -2057,7 +2142,9 @@ Panel {
                   Layout.preferredWidth: cardRow.cellWidth
                   Layout.fillWidth: true
                   Layout.fillHeight: true
-                  implicitHeight: cardSlot.isCurve ? curveCard.implicitHeight : metricCard.implicitHeight
+                  implicitHeight: cardSlot.isCurve ? curveCard.implicitHeight
+                    : cardSlot.isWeight ? weightCard.implicitHeight
+                    : metricCard.implicitHeight
 
                   CurveCard {
                     id: curveCard
@@ -2084,11 +2171,35 @@ Panel {
                     muted: root.showStale
                   }
 
+                  WeightCard {
+                    id: weightCard
+                    width: parent.width
+                    height: cardSlot.height
+                    visible: cardSlot.isWeight
+                    // Gates the Canvas: only the card that is actually on
+                    // screen pays for a paint texture.
+                    active: visible
+                    icon: cardSlot.card.icon || ""
+                    title: cardSlot.card.title || ""
+                    value: cardSlot.card.value || "—"
+                    tone: cardSlot.card.tone || ""
+                    caption: root.staleCaption(cardSlot.card.caption || "", cardSlot.modelData)
+                    delta: cardSlot.card.delta || ""
+                    deltaTone: cardSlot.card.deltaTone || ""
+                    series: root.weightSeries
+                    foreground: root.foreground
+                    accentColor: root.accentColor
+                    urgentColor: root.urgentColor
+                    dim: root.dim
+                    fontFamily: root.fontFamily
+                    muted: root.showStale || root.isCarried(cardSlot.modelData)
+                  }
+
                   MetricCard {
                     id: metricCard
                     width: parent.width
                     height: cardSlot.height
-                    visible: !cardSlot.isCurve
+                    visible: !cardSlot.isCurve && !cardSlot.isWeight
                     icon: cardSlot.card.icon || ""
                     title: cardSlot.card.title || ""
                     value: cardSlot.card.value || "—"

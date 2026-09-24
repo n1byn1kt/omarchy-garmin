@@ -122,6 +122,19 @@ Item {
     return false
   }
 
+  // Weight (PR #1 port): the helper has no way to see the shell/manifest
+  // deck on its own — prefs.json can only tell it about an override, never
+  // about the fallback default — so this mirrors customEnabled exactly and
+  // gates a `--weight` flag on the fetch instead of gating a whole second
+  // Process. Weight is sensitive data; nobody pays for that fetch (or the
+  // extra API call it costs) unless the card is actually in the deck.
+  readonly property bool weightEnabled: {
+    var parts = String(root.effectivePanelMetrics || "").split(",")
+    for (var i = 0; i < parts.length; i++)
+      if (parts[i].replace(/^\s+|\s+$/g, "").toLowerCase() === "weight") return true
+    return false
+  }
+
   // 8 KB is already two orders of magnitude more than a card needs. Past it we
   // stop reading rather than truncate: half a JSON object parses as garbage,
   // and "your command printed too much" is the more useful thing to say.
@@ -152,7 +165,9 @@ Item {
     _stdout = ""
     root.lastHint = ""
     var burst = week === true
-    fetchProcess.command = burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
+    var cmd = burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
+    if (root.weightEnabled) cmd.push("--weight")
+    fetchProcess.command = cmd
     // Fourteen sequential Garmin calls with the library's own retries can
     // outlast the 45s that a today-only fetch is allowed.
     watchdog.interval = burst ? 120000 : 45000

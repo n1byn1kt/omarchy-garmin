@@ -253,6 +253,67 @@ ACTIVITIES = [
 ACTIVITIES_DICT_FORM = {"activityList": ACTIVITIES}
 
 
+# --- get_weigh_ins(start, end) -----------------------------------------------
+# Ranged call (PR #1 port). Each day is a dailyWeightSummary; allWeightMetrics
+# holds every sample that day (two on one day, to prove a timeline keeps both
+# rather than rolling the day up). Weight is in grams. samplePk / owner name
+# are hostile fields that must not reach the payload. Every value below is
+# invented for this port (72.4-74.1 kg, day-relative timestamps) — none of it
+# is the PR author's own weigh-in data.
+def _weigh(back, hour, grams, delta=None):
+    cal = day(back)
+    ts = int(_dt.datetime.combine(
+        _dt.date.fromisoformat(cal), _dt.time(hour, 14, 0)).timestamp() * 1000)
+    return {
+        "samplePk": 1_000_000_001 + back,
+        "date": ts + 7_200_000,
+        "calendarDate": cal,
+        "weight": grams,
+        "bmi": None,
+        "bodyFat": None,
+        "sourceType": "MANUAL",
+        "timestampGMT": ts,
+        "weightDelta": delta,
+        "ownerFullName": "Widget Tester",
+    }
+
+
+def _weigh_day(back, rows):
+    grams = [r["weight"] for r in rows]
+    return {
+        "summaryDate": day(back),
+        "numOfWeightEntries": len(rows),
+        "minWeight": min(grams),
+        "maxWeight": max(grams),
+        "latestWeight": rows[-1],
+        "allWeightMetrics": rows,
+    }
+
+
+WEIGH_INS = {
+    "dailyWeightSummaries": [
+        _weigh_day(0, [_weigh(0, 7, 72400.0, -300)]),
+        _weigh_day(2, [_weigh(2, 7, 72700.0, -400)]),
+        _weigh_day(5, [_weigh(5, 7, 73100.0, 200)]),
+        _weigh_day(9, [_weigh(9, 7, 72900.0, -600)]),
+        _weigh_day(14, [_weigh(14, 7, 73500.0, 300)]),
+        _weigh_day(20, [
+            _weigh(20, 7, 73200.0, None),
+            _weigh(20, 19, 74100.0, 900),
+        ]),
+        _weigh_day(27, [_weigh(27, 8, 73800.0, None)]),
+    ],
+    "totalAverage": {"weight": 73242.86},
+}
+
+# get_body_composition envelope: one row per day, already in grams.
+WEIGH_INS_DATE_LIST = {
+    "startDate": day(29),
+    "endDate": day(0),
+    "dateWeightList": [s["latestWeight"] for s in WEIGH_INS["dailyWeightSummaries"]],
+}
+
+
 def week_stress(backs=range(6, -1, -1)):
     # connectapi("/usersummary-service/stats/stress/daily/{start}/{end}") —
     # durations in SECONDS

@@ -291,6 +291,10 @@ def test_api_display_strings_are_clipped(home):
     act = mod.build_activity({"activityType": {"typeKey": long},
                               "duration": 60, "distance": 1000})
     assert len(act["type"]) == mod.STR_CLIP
+    w = mod.build_weight({"dateWeightList": [
+        {"calendarDate": long, "weight": 72000, "timestampGMT": 1}]})
+    assert len(w["date"]) == mod.STR_CLIP
+    assert len(w["startDate"]) == mod.STR_CLIP
 
 
 # --- every QML Text sink renders plain text ----------------------------------
@@ -346,7 +350,8 @@ def test_carried_token_map_is_single_and_matches_carry_keys():
     body = panel.split("carriedTokenMap: ({", 1)[1].split("})", 1)[0]
     pairs = dict(re.findall(r'"(\w+)":\s*"(\w+)"', body))
     assert pairs == {"hrvStatus": "hrv", "intensityMinutes": "intensity",
-                     "activities": "activity", "readiness": "readiness"}
+                     "activities": "activity", "readiness": "readiness",
+                     "weight": "weight"}
     assert set(pairs) == set(load_helper().CARRY_KEYS)
     # Every target is a real card token.
     known = panel.split("knownMetrics: [", 1)[1].split("]", 1)[0]

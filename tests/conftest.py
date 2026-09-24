@@ -75,6 +75,11 @@ class FakeGarmin:
     intensity = None
     last_activity = None
     activities = None
+    weigh_ins = None
+    # "metric" (kg) unless a test opts into "statute" (lb) — real
+    # garminconnect sets this from login()'s own profile/settings fetch,
+    # so it is a plain attribute here too, not a call that needs faking.
+    unit_system = "metric"
     exc = {}          # method name -> exception to raise
 
     def __init__(self, *a, **kw):
@@ -157,6 +162,20 @@ class FakeGarmin:
         self._maybe_raise("get_activities", start, limit)
         return FakeGarmin.activities
 
+    def get_weigh_ins(self, start, end):
+        self._maybe_raise("get_weigh_ins", start, end)
+        return FakeGarmin.weigh_ins
+
+    def get_unit_system(self):
+        # Not counted in `calls`: the real method reads an attribute set at
+        # login, so faking it as a fetch call would misrepresent the budget.
+        # Still raiseable via `exc`, for the one test that checks the
+        # fallback when this attribute read itself goes wrong.
+        e = FakeGarmin.exc.get("get_unit_system")
+        if e:
+            raise e
+        return FakeGarmin.unit_system
+
 
 class AuthError(Exception):
     pass
@@ -175,6 +194,8 @@ def fake_garmin(monkeypatch):
     FakeGarmin.intensity = None
     FakeGarmin.last_activity = None
     FakeGarmin.activities = None
+    FakeGarmin.weigh_ins = None
+    FakeGarmin.unit_system = "metric"
     FakeGarmin.summary_by_date = {}
     FakeGarmin.sleep_by_date = {}
     FakeGarmin.daily_steps = None

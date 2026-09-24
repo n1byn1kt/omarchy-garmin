@@ -23,6 +23,7 @@ CACHE_PATH = _home() / ".cache" / "garmin-widget" / "last.json"
 HISTORY_PATH = _home() / ".cache" / "garmin-widget" / "history.json"
 
 HISTORY_DAYS = 7
+WEIGHT_DAYS = 30    # weigh-ins are sparse; a week of history would be mostly empty
 # One row per day in history.json. Every key is always present, None when no
 # source has ever had a value for it, so QML branches on null, not undefined.
 HISTORY_FIELDS = (
@@ -215,7 +216,7 @@ def _dispatch(argv) -> int:
     if cmd == "status":
         return cmd_status()
     if cmd == "fetch":
-        return cmd_fetch(week="--week" in argv[1:])
+        return cmd_fetch(week="--week" in argv[1:], weight="--weight" in argv[1:])
     if cmd == "login":
         return cmd_login()
     if cmd == "prefs":
@@ -596,7 +597,193 @@ def build_calories(summary):
     return {"total": total, "active": active}
 
 
-def build_payload(summary, sleep, as_of, extras=None, activity_names=True):
+# --- weight (v0.5 port of PR #1, @xshatx) ------------------------------------
+#
+# Ported onto the v0.5 fetch layer rather than merged: the PR was written
+# against 0.3.x, before _safe/FAILED, CARRY_KEYS, or the whitelist-rebuild-on-
+# load discipline existed. The shape below keeps the PR's field names
+# (current/date/startDate/delta/series) and its two-envelope tolerance, but
+# adds `unit` and fetches only when the panel actually shows the card (see
+# _fetch_extras/cmd_fetch).
+_LB_PER_KG = 2.20462
+
+
+def _to_unit(kg, unit):
+    """`kg` converted to the display unit, 1 decimal, or None.
+
+    Kept as one small function (rather than inlining the multiply at each of
+    current/delta/series) so a future third unit is one line, not three.
+    """
+    if kg is None:
+        return None
+    return round(kg * _LB_PER_KG, 1) if unit == "lb" else round(kg, 1)
+
+
+def _weight_unit(g):
+    """"kg" or "lb", from Garmin's own measurement-system setting.
+
+    garminconnect 0.3.11 loads this at login (Garmin.login() calls
+    _load_profile_and_settings(), which sets self.unit_system from
+    userData.measurementSystem) — get_unit_system() is a local attribute
+    read, not a second network call, so this costs nothing against the
+    fetch budget. Anything other than the literal "statute" (an unset
+    attribute, "metric", a future value this helper has never seen) falls
+    back to kg — the unit build_weight's own math is already done in, so
+    "unknown" costs a display label, never a wrong conversion.
+    """
+    try:
+        v = g.get_unit_system()
+    except Exception:
+        return "kg"
+    return "lb" if isinstance(v, str) and v.strip().lower() == "statute" else "kg"
+
+
+def _kg(v):
+    """Garmin weight in kilograms, 1 decimal, or None.
+
+    The weight-service stores grams. A value already in kg is well under
+    1000, which is also below any honest adult weigh-in in grams, so that
+    is the split. Zero and negative readings are dropped the same way
+    stress drops its 'watch off' sentinels.
+    """
+    n = _num(v)
+    if n is None or n <= 0:
+        return None
+    kg = n / 1000.0 if n >= 1000 else n
+    return round(kg, 1)
+
+
+def _weight_timestamp(row):
+    """Epoch milliseconds for one weigh-in, or None."""
+    ts = _num(row.get("timestampGMT"))
+    if ts is None:
+        ts = _num(row.get("date"))
+    if ts is not None:
+        ts = int(ts)
+        return ts if ts > 0 else None
+    cal = row.get("calendarDate")
+    if not isinstance(cal, str):
+        return None
+    try:
+        d = datetime.date.fromisoformat(cal[:10])
+    except ValueError:
+        return None
+    ts = int(datetime.datetime(d.year, d.month, d.day).timestamp() * 1000)
+    return ts if ts > 0 else None
+
+
+def _weight_rows(raw):
+    """Weigh-in dicts from whichever envelope Garmin sent.
+
+    get_weigh_ins (the ranged call) wraps days in dailyWeightSummaries with
+    allWeightMetrics; get_body_composition uses a flat dateWeightList. Both
+    shapes are accepted so a garminconnect rename of one endpoint still
+    yields a card from the other.
+    """
+    if not isinstance(raw, dict):
+        return []
+    rows = raw.get("dateWeightList")
+    if isinstance(rows, list):
+        return [r for r in rows if isinstance(r, dict)]
+    summaries = raw.get("dailyWeightSummaries")
+    if not isinstance(summaries, list):
+        return []
+    out = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        metrics = summary.get("allWeightMetrics")
+        if isinstance(metrics, list) and metrics:
+            out.extend(r for r in metrics if isinstance(r, dict))
+            continue
+        latest = summary.get("latestWeight")
+        if isinstance(latest, dict):
+            out.append(latest)
+    return out
+
+
+def build_weight(raw, unit="kg"):
+    """{current, date, startDate, delta, series, unit} — or None.
+
+    series is [[epochMs, value], ...] oldest first, downsampled to the same
+    96-point cap the day curve uses, values already in the display unit.
+    samplePk, sourceType and the rest of the weigh-in dict stay out: they
+    are identifiers, not a figure.
+
+    delta is computed in kg (a stable diff regardless of display unit) and
+    converted once at the end, so rounding a display-unit delta from two
+    already-rounded display-unit values never amplifies the rounding.
+    """
+    points = []
+    seen = set()
+    for row in _weight_rows(raw):
+        kg, ts = _kg(row.get("weight")), _weight_timestamp(row)
+        if kg is None or ts is None:
+            continue
+        key = (ts, kg)
+        if key in seen:
+            continue
+        seen.add(key)
+        cal = row.get("calendarDate")
+        date = _clip(cal.split("T")[0].split(" ")[0]) if isinstance(cal, str) else None
+        points.append((ts, kg, date))
+    if not points:
+        return None
+    points.sort(key=lambda p: p[0])
+    last, prev = points[-1], points[-2] if len(points) > 1 else None
+    delta_kg = None if prev is None else round(last[1] - prev[1], 1)
+    unit = unit if unit == "lb" else "kg"
+    return {
+        "current": _to_unit(last[1], unit),
+        "date": last[2],
+        "startDate": points[0][2],
+        "delta": _to_unit(delta_kg, unit),
+        "series": [[p[0], _to_unit(p[1], unit)] for p in _downsample(
+            [[p[0], p[1]] for p in points])],
+        "unit": unit,
+    }
+
+
+def _rebuild_cached_weight(value):
+    """Re-applies the weight payload's own whitelist to a cached dict.
+
+    Unlike activities, a cached `weight` value is already in *payload*
+    shape (current/date/startDate/delta/series/unit) — there is no raw
+    Garmin envelope left to re-parse on load, so amendment 4's protection
+    ("whitelist-rebuild on cache load") is applied by rebuilding this exact
+    dict field by field instead: only known keys survive, `series` entries
+    are re-validated as [epochMs, number] pairs and re-capped, `unit` is
+    pinned to a known literal, and the strings go through the same
+    _clip_strings pass as every other cached field. A hand-edited (or
+    planted) last.json cannot smuggle an extra field or an oversized series
+    past a stale-cache serve or a carry-forward this way.
+    """
+    if not isinstance(value, dict):
+        return None
+    series = value.get("series")
+    clean = []
+    if isinstance(series, list):
+        for p in series[:CURVE_POINTS * 4]:
+            if not isinstance(p, (list, tuple)) or len(p) < 2:
+                continue
+            t, v = _num(p[0]), _num(p[1])
+            if t is None or v is None:
+                continue
+            clean.append([int(t), v])
+    unit = value.get("unit")
+    unit = unit if unit in ("kg", "lb") else "kg"
+    return {
+        "current": _num(value.get("current")),
+        "date": _clip(value.get("date")),
+        "startDate": _clip(value.get("startDate")),
+        "delta": _num(value.get("delta")),
+        "series": _downsample(clean),
+        "unit": unit,
+    }
+
+
+def build_payload(summary, sleep, as_of, extras=None, activity_names=True,
+                  weight_unit="kg"):
     dto = _get(sleep, "dailySleepDTO") or {}
     secs = dto.get("sleepTimeSeconds")
     extras = extras or {}
@@ -626,6 +813,10 @@ def build_payload(summary, sleep, as_of, extras=None, activity_names=True):
     payload["activities"] = build_activities(extras.get("activities"),
                                              activity_names=activity_names)
     payload["lastActivity"] = payload["activities"][0] if payload["activities"] else None
+    # `weight` is None both when the endpoint failed and when it was never
+    # asked for (the token is not in the effective deck) — extras.get simply
+    # returns None either way, and build_weight(None, ...) is None too.
+    payload["weight"] = build_weight(extras.get("weight"), weight_unit)
     return payload
 
 
@@ -642,7 +833,14 @@ FAILED = object()
 # own keys) since that's what cmd_fetch substitutes into. `curve` is
 # deliberately absent — an intraday series is day-bound; yesterday's curve
 # under today's label would be a lie even when marked stale.
-CARRY_KEYS = ("hrvStatus", "readiness", "intensityMinutes", "activities")
+#
+# `weight` joins this list (PR #1 port): a 30-day timeline is exactly the
+# kind of sparse, slow-moving series where one failed fetch blanking the
+# whole card would be worse than showing last poll's (marked-stale) one.
+# It only ever *is* a candidate to carry when the card was actually asked
+# for — see _fetch_extras: the key is simply absent from `raw` otherwise,
+# so it can never end up in `failed` for a disabled card.
+CARRY_KEYS = ("hrvStatus", "readiness", "intensityMinutes", "activities", "weight")
 
 
 def _activities_or_failed(fn):
@@ -680,7 +878,7 @@ def _safe(fn):
         return FAILED
 
 
-def _fetch_extras(g, today, skip_body_battery=False):
+def _fetch_extras(g, today, skip_body_battery=False, fetch_weight=False):
     """(extras, failed) — extras has FAILED replaced by None for the
     builders below; failed is the set of extras keys (payload-key spelling)
     whose live call raised, for cmd_fetch's carry-forward step.
@@ -689,6 +887,14 @@ def _fetch_extras(g, today, skip_body_battery=False):
     the same endpoint with an end date), so the day call is skipped and
     cmd_fetch fills the key from the window instead — that skip is not a
     failure, so it is never in `failed`.
+
+    `get_weigh_ins` (PR #1 port) is the one endpoint here that is not always
+    asked for: weight is sensitive data nobody should pay a fetch for
+    without opting in, so `fetch_weight` (cmd_fetch's `--weight`, set only
+    when the effective panel deck includes the `weight` token) gates
+    whether the key even enters `raw` at all. Left out entirely rather than
+    set to a "skip" sentinel like bodyBattery above, so it can never be
+    mistaken for a failure and carried.
     """
     raw = {
         "bodyBattery": None if skip_body_battery else _safe(lambda: g.get_body_battery(today)),
@@ -698,6 +904,10 @@ def _fetch_extras(g, today, skip_body_battery=False):
         "intensityMinutes": _safe(lambda: g.get_intensity_minutes_data(today)),
         "activities": _activities_or_failed(lambda: g.get_activities(0, ACTIVITY_LIMIT)),
     }
+    if fetch_weight:
+        weight_start = (datetime.date.fromisoformat(today)
+                        - datetime.timedelta(days=WEIGHT_DAYS - 1)).isoformat()
+        raw["weight"] = _safe(lambda: g.get_weigh_ins(weight_start, today))
     failed = {k for k, v in raw.items() if v is FAILED}
     extras = {k: (None if v is FAILED else v) for k, v in raw.items()}
     return extras, failed
@@ -786,6 +996,12 @@ def _load_cache():
         # sorts and displays instead of being silently dropped.
         cached["activities"] = build_activities(
             [_migrate_legacy_activity(e) for e in cached["activities"]])
+    if isinstance(cached.get("weight"), dict):
+        # Same discipline as activities above, per PR #1's port (item 4):
+        # a cached `weight` object is re-whitelisted on every load so a
+        # hand-edited last.json can't smuggle an extra field or a padded
+        # series past the stale-cache-serving or carry-forward paths.
+        cached["weight"] = _rebuild_cached_weight(cached["weight"])
     return cached
 
 
@@ -799,12 +1015,21 @@ def _migrate_legacy_activity(entry):
         return dict(entry, start=entry["date"])
     return entry
 
-def cmd_fetch(week=False) -> int:
+def cmd_fetch(week=False, weight=False) -> int:
     """Today's payload, plus the trailing week of history.
 
     `week` (the `--week` flag) forces the ranged window fetch; otherwise it
     runs only on the first successful fetch of a calendar day. Every other
     poll is today-only — the same eight calls v0.2 made.
+
+    `weight` (the `--weight` flag, PR #1 port) asks the helper to also fetch
+    the 30-day weigh-in timeline. The helper itself has no way to know the
+    panel's effective deck — prefs.json can only tell it about an override,
+    never about the shell/manifest default the panel falls back to when
+    there is no override — so Service.qml computes that (the same way it
+    already gates the `custom` card's command) and passes the flag down.
+    Simplest robust option: the caller who actually knows the deck says so,
+    rather than the helper guessing from a file it may not even have.
     """
     if not HAS_GARMINCONNECT:
         return emit({"ok": False, "error": "deps",
@@ -827,7 +1052,13 @@ def cmd_fetch(week=False) -> int:
         burst = week or fetched_on != today
         summary = g.get_user_summary(today) or {}
         sleep = g.get_sleep_data(today) or {}
-        extras, failed_keys = _fetch_extras(g, today, skip_body_battery=burst)
+        # get_unit_system() is a local attribute set during login(), not a
+        # network call, so this costs nothing against the fetch budget —
+        # still only asked for when weight was actually requested, since
+        # the unit is meaningless otherwise.
+        weight_unit = _weight_unit(g) if weight else "kg"
+        extras, failed_keys = _fetch_extras(g, today, skip_body_battery=burst,
+                                            fetch_weight=weight)
         window = _fetch_window(g, _window_dates(today)[0], today) if burst else {}
         readiness_backfill = {}
         if burst:
@@ -862,7 +1093,8 @@ def cmd_fetch(week=False) -> int:
                     readiness_backfill[d] = built["score"]
         activity_names = _read_prefs().get("activityNames", True)
         payload = build_payload(summary, sleep, now, extras,
-                                activity_names=activity_names)
+                                activity_names=activity_names,
+                                weight_unit=weight_unit)
         # Per-domain freshness (v0.5 A5): a secondary endpoint that *raised*
         # keeps its last cached value (marked in `carried`) instead of
         # blanking its card — but only for keys in CARRY_KEYS; an endpoint
@@ -1250,7 +1482,8 @@ def _update_history(payload, today, window=None, burst=False, readiness_backfill
 # with knownMetrics in Panel.qml — a token this helper drops is a card the
 # panel can never be asked for again.
 PANEL_METRICS = ("curve", "battery", "sleep", "steps", "readiness", "rhr",
-                 "hrv", "intensity", "floors", "calories", "activity", "custom")
+                 "hrv", "intensity", "floors", "calories", "weight",
+                 "activity", "custom")
 BAR_METRICS = ("bodyBattery", "steps", "sleep", "readiness")
 
 # A pref value is a short token list typed by a person, not a document. The cap
