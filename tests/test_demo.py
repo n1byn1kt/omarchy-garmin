@@ -238,10 +238,13 @@ def test_demo_cache_is_never_carried_or_rewritten(home, fake_garmin, capsys):
                    for a in written.get("activities") or [])
 
 
-def test_a_non_true_demo_flag_is_stripped_not_trusted(home, capsys):
+def test_any_demo_key_refuses_the_cache(home, capsys):
+    """Grok v0.5 QC #4: not just `true` — `"yes"`, `1`, even `false` mean a
+    demo writer (or a hand edit) touched this file; the QML only marks demo
+    on `=== true`, so a served body would read as the user's own data."""
     mod = load_helper()
     mod.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    mod.CACHE_PATH.write_text(json.dumps({"ok": True, "demo": "yes",
-                                          "bodyBattery": {"current": 50}}))
-    cached = mod._load_cache()
-    assert cached is not None and "demo" not in cached
+    for flag in ("yes", 1, "true", False, None):
+        mod.CACHE_PATH.write_text(json.dumps({"ok": True, "demo": flag,
+                                              "bodyBattery": {"current": 50}}))
+        assert mod._load_cache() is None, flag

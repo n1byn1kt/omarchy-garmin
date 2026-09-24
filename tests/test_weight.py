@@ -285,7 +285,27 @@ def test_load_cache_refuses_a_non_dict_weight(home, fake_garmin, capsys):
     planted["weight"] = "not a dict"
     mod.CACHE_PATH.write_text(json.dumps(planted))
     loaded = mod._load_cache()
-    assert loaded["weight"] == "not a dict"
+    assert loaded["weight"] is None                    # Grok v0.5 QC #3
+    for bad in (["a", "list"], 42, True):
+        planted["weight"] = bad
+        mod.CACHE_PATH.write_text(json.dumps(planted))
+        assert mod._load_cache()["weight"] is None, bad
+
+
+def test_a_stale_serve_without_the_flag_drops_the_cached_series(home, fake_garmin, capsys):
+    """Grok v0.5 QC #3: the card was on (series cached), then turned off;
+    an offline serve before any successful poll must not emit the old
+    series — the missing `--weight` is the caller saying the card is gone."""
+    _all_endpoints(fake_garmin)
+    fake_garmin.weigh_ins = fixtures.WEIGH_INS
+    mod = load_helper()
+    assert _fetch(mod, capsys, weight=True)["weight"]["series"]
+    fake_garmin.exc = {"get_user_summary": ConnectionError("down")}
+    out = _fetch(load_helper(), capsys)
+    assert out["stale"] is True and out["weight"] is None
+    fake_garmin.calls = []
+    out = _fetch(load_helper(), capsys, weight=True)   # back on: still served
+    assert out["stale"] is True and out["weight"]["series"]
 
 
 # --- prefs ----------------------------------------------------------------------

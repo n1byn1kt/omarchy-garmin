@@ -90,7 +90,8 @@ def test_backfill_respects_safe_failed_semantics_one_call_isolated(home, fake_ga
     """A raised get_training_readiness for the backfill must not break the
     fetch, and must not carry a stale value into that day's row — it's a
     history field, not a top-level payload key, so CARRY_KEYS doesn't apply
-    here; the day just stays null and gets retried on the next burst."""
+    here; the day just stays null and is retried on the next calendar day
+    (the miss memo, Grok v0.5 QC #6 — test_grok_v05_qc.py)."""
     _all_endpoints(fake_garmin)
     _stock_week(fake_garmin)
     fake_garmin.exc = {"get_training_readiness": RuntimeError("boom")}
