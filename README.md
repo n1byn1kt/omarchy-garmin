@@ -36,6 +36,8 @@ than a seven-day strip, since weigh-ins skip days as a matter of course. The
 rest of the cards (curve, intensity, floors, activity, custom) show a figure
 only. Every card gets a footer timestamp and a Refresh button.
 
+![Sleep detail page](docs/week-sleep.png)
+
 **Click a card for its week.** Battery, sleep, steps, readiness, resting HR,
 HRV and calories — and the day curve, which opens the week's **stress** — each
 have a detail page: a full-width chart of the last seven days with a value
@@ -85,8 +87,8 @@ hours around midnight in either timezone.
 | Action | Result |
 |---|---|
 | Left click the chip | Open / close the panel — opening also retries a failed or stale fetch (a `live` state is left alone) |
-| Left click a card | Open that metric's seven-day detail page (see above) |
-| Arrow icon (panel header, detail page) | Back to the cards |
+| Left click a card | Open that metric's seven-day detail page, or the activity list for the activity card (see above) |
+| Arrow icon (panel header, detail page) | Back to the cards (or from an activity's detail page, back to the list) |
 | Middle click the chip | Force a refresh — today's numbers and the whole week's history |
 | Pencil icon (panel header) | Enter / leave edit mode |
 | `Escape` (panel focused) | Leave the detail page, else leave edit mode, else close the panel |
@@ -96,9 +98,13 @@ hours around midnight in either timezone.
 | `↑ ↓` / `j` `k` (edit mode) | Walk the rows — arrow keys and their `j`/`k` equivalents work interchangeably |
 | `← →` / `h` `l` (edit mode) | Reorder the current row (or pick the bar-chip metric on the top row) — arrow keys and their `h`/`l` equivalents work interchangeably |
 | `space` / `Enter` (edit mode) | Show or hide the row — the two keys are equivalent |
+| `↑ ↓` / `j` `k` (activity list) | Move the list's cursor |
+| `Enter` / `→` / `l` (activity list) | Open the cursored activity's detail page |
+| `←` / `h` / `Escape` (activity detail, activity list) | Back a level — detail → list → cards |
 | `Tab` / `Shift-Tab` (panel focused) | Switch to the next / previous bar-widget's panel (multi-monitor setups) |
 | `omarchy-shell garmin refresh\|open\|close\|toggle` | Same, from a script or a keybind |
-| `omarchy-shell garmin detail sleep` | Open the panel straight onto one metric's week (`battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `calories`, or `curve` for stress) |
+| `omarchy-shell garmin detail sleep` | Open the panel straight onto one metric's week (`battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `calories`, `curve` for stress, or `activity` for the activity list) |
+| `omarchy-shell garmin detail activity:<id>` | Open the activity list and jump straight to that activity's detail page; an unrecognised id just opens the list |
 
 ---
 
@@ -190,6 +196,112 @@ that takes seconds delays nothing, but it also does not get to run more often
 than the poll interval.
 
 ---
+
+## Demo mode
+
+![Activity list](docs/activities.png)
+
+`demoMode` runs the whole widget on synthetic, deterministic data — no
+account, no network, no venv, and nothing written to or read from disk.
+Turn it on from a terminal:
+
+```bash
+omarchy bar set io.github.n1byn1kt.garmin demoMode true --json
+```
+
+(`false` to leave, or use the settings UI — it's a plain boolean toggle
+there.) It is meant for trying the widget before you have an account
+connected, and for screenshots.
+
+What it guarantees:
+
+- **Nothing is fetched, nothing real is touched.** The helper never talks
+  to Garmin in demo mode, and never reads or writes `last.json` or
+  `history.json` — your real cache is exactly as it was before you toggled.
+- **Marked everywhere.** The bar chip gets a trailing ` demo`; the panel's
+  hero line reads `Demo data` and a two-line urgent-coloured banner sits
+  under it on every page (`c` copies the command that turns it back off);
+  every detail and list page's meta says `· demo`; the footer reads
+  `demo data · nothing fetched` instead of a timestamp. "Open in Garmin
+  Connect" is hidden, since demo activity ids are fabricated.
+- **Deterministic per day.** The same calendar day always produces the
+  same numbers — good for a reproducible screenshot, bad if you're hoping
+  demo mode will show you something new tomorrow.
+- **Primary-only.** On a multi-monitor setup only the primary bar instance
+  owns the setting; every other monitor's panel follows it, so you can't
+  end up with one bar showing real data and another showing fiction.
+- Edit mode keeps working in demo — it rearranges cards, not health data —
+  and the `custom` card is skipped while demo is on, since it isn't Garmin
+  data to begin with.
+
+## Activities
+
+![Activity detail page](docs/activity-detail.png)
+
+Click the activity card (or `omarchy-shell garmin detail activity`) for a
+list of your **last 10 activities**: type glyph, name or type, date,
+duration, distance, heart rate and calories, with a "this week" summary
+line when the list actually reaches back that far. `↑↓` / `j k` move the
+list's cursor, `Enter` / `→` / `l` opens the highlighted row, `←` / `h` or
+`Escape` goes back. Opening a row shows its detail page — duration,
+distance, pace (running/walking/hiking) or speed (cycling), heart rate,
+calories, elevation — and a bordered **Open in Garmin Connect** button
+(hidden for a demo activity, or one with no usable id).
+
+Only ten fields per activity are ever kept: id, type, name, start time,
+duration, distance, average/max heart rate, calories and elevation gain.
+**Never stored, on principle**: GPS coordinates, location names, device
+ids, or your Garmin account/owner ids — all present in Garmin's raw
+response and all dropped before the whitelist even runs. The one caveat
+is the name itself: Garmin often auto-names an activity after a place
+(`"Kraków Running"`), and that name is kept because it's the one thing you
+chose or saw as the activity's title. If you'd rather not have that on
+disk, turn it off:
+
+```bash
+~/.config/omarchy/plugins/io.github.n1byn1kt.garmin/bin/garmin-widget prefs set activityNames false
+```
+
+(default: on). Unlike the settings above, this one lives only in
+`prefs.json`, not the bar widget's settings UI.
+
+If the activities endpoint fails on a given poll but a previous list is
+cached, the card and the list page keep showing that cached list, marked
+`stale`, rather than going blank — the same per-domain carry-forward rule
+covers readiness, HRV, intensity minutes and weight.
+
+## Weight
+
+An opt-in card — add `weight` to `panelMetrics` or turn its row on in edit
+mode — showing a 30-day weigh-in timeline with a `↗ ↘ →` delta against
+your previous weigh-in. It's opt-in because it's fetched only when it's
+actually on: `get_weigh_ins` is never called otherwise, and turning the
+card off stops the calls and the caching going forward. Units (kg or lb)
+follow your Garmin account's own measurement-system setting, not a switch
+of the widget's own. Weight card contributed by @xshatx (PR #1).
+
+## What's new in 0.5.0
+
+- **Activities.** The activity card now opens a list of your last 10
+  activities, each with its own detail page and a guarded link to open it
+  in Garmin Connect. See [Activities](#activities) above.
+- **Per-domain carry-forward.** A secondary endpoint (readiness, HRV,
+  intensity minutes, activities, weight) that fails on one poll now keeps
+  showing its last cached value, marked `stale`, instead of blanking that
+  one card.
+- **Training readiness backfill.** On the weekly burst, any of the seven
+  window days still missing a readiness score gets one extra
+  `get_training_readiness(date)` call, so a laptop that slept through a
+  weekend fills in both days' readiness the next time it wakes, at the
+  cost of one call per still-missing day rather than waiting a day at a
+  time.
+- **Weight card** (opt-in, fetched only when enabled, kg/lb from your
+  Garmin account's own unit setting) — contributed by @xshatx (PR #1). See
+  [Weight](#weight) above.
+- **Demo mode.** `demoMode` runs the widget on synthetic, clearly-marked
+  data with no account and no network — see [Demo mode](#demo-mode) above.
+- `get_activities(0, 20)` replaces the old `get_last_activity()` call
+  (same endpoint, a bigger limit; no change to the call budget).
 
 ## What's new in 0.4.2
 
@@ -422,7 +534,7 @@ Configured per bar-widget instance in Omarchy's bar settings (or in
 | `barMetric` | enum | `bodyBattery` | Which number the bar chip carries: `bodyBattery`, `steps`, `sleep` (score) or `readiness` (training readiness). Case-insensitive; anything unrecognised falls back to `bodyBattery` rather than blanking the chip. The glyph changes with it. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 | `showSteps` | boolean | `false` | Also show today's steps as a second figure in the bar (e.g. the bolt glyph and `61` followed by `8.0k`). Ignored when `barMetric` is `steps` — the same number twice is not worth the width. |
 | `stepsGoalFallback` | integer | `10000` | Step goal used in the panel when Garmin does not return one for the day. |
-| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `weight` (30-day weigh-in timeline — see the privacy note below), `activity` (your last activity), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
+| `panelMetrics` | string | `curve,sleep,steps,readiness,rhr` | Which cards the panel shows, comma-separated. **The order you write is the order they appear.** Tokens: `curve` (Body Battery + stress for the day), `battery`, `sleep`, `steps`, `readiness`, `rhr`, `hrv`, `intensity` (weekly intensity minutes), `floors`, `calories`, `weight` (30-day weigh-in timeline — see [Weight](#weight) below), `activity` (your last 10 activities — see [Activities](#activities) below), `custom` (your own command — see [Your own card](#your-own-card)). Unknown tokens are skipped — a typo costs you one card, not the panel — and a card whose data Garmin did not return is left out. Past six visible cards the panel switches to a **dense layout**: the seven-day strips are dropped and metric cards pair up two to a row, to keep the panel a sane height. **Overridden by the panel's edit mode** (see [above](#rearranging-the-cards-from-the-panel)). |
 
 **Weight is opt-in, and fetched only when it's on.** Body weight is more
 sensitive than a step count, so the helper never asks Garmin for it unless
@@ -434,6 +546,7 @@ card shows kg or lb, whichever your Garmin account's own unit setting says
 (metric/statute) — the widget follows Garmin's choice rather than having a
 setting of its own to get out of sync.
 | `customCommand` | string | `""` (off) | A command line whose stdout is one JSON object `{title, value, caption, meter:{value,max}, tone}`, rendered as the `custom` card. Empty means the card does not exist and nothing is ever run. See [Your own card](#your-own-card) for the contract and the safety rails. |
+| `demoMode` | boolean | `false` | Runs the widget on synthetic, clearly-marked data — no account, no network, nothing written or read. Primary-only on a multi-monitor setup. See [Demo mode](#demo-mode) above. |
 
 On a multi-monitor setup the widget appears on every bar, and it is designed so
 that only **one** instance polls, fanning the result out to the others — one
