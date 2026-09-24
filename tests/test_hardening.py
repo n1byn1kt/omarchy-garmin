@@ -307,6 +307,25 @@ def test_every_qml_text_element_is_plaintext():
                 assert "Text.PlainText" in block, f"{qml.name}:{i + 1} lacks textFormat"
 
 
+def test_carried_token_map_is_single_and_matches_carry_keys():
+    """`carried` holds payload keys; cards are named by tokens. Panel.qml maps
+    one to the other in exactly one literal, and that literal must cover the
+    helper's CARRY_KEYS — a key carried without a token would never dim."""
+    import pathlib, re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    panel = (root / "Panel.qml").read_text()
+    assert panel.count("carriedTokenMap: ({") == 1
+    body = panel.split("carriedTokenMap: ({", 1)[1].split("})", 1)[0]
+    pairs = dict(re.findall(r'"(\w+)":\s*"(\w+)"', body))
+    assert pairs == {"hrvStatus": "hrv", "intensityMinutes": "intensity",
+                     "activities": "activity", "readiness": "readiness"}
+    assert set(pairs) == set(load_helper().CARRY_KEYS)
+    # Every target is a real card token.
+    known = panel.split("knownMetrics: [", 1)[1].split("]", 1)[0]
+    for token in pairs.values():
+        assert f'"{token}"' in known
+
+
 # --- grok-review round: fifos, parent symlinks, cache clipping ---------------
 
 def test_fifo_at_cache_path_is_refused_not_hung(home, fake_garmin, capsys):

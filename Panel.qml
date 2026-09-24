@@ -255,6 +255,65 @@ Panel {
     return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2)
   }
 
+  // ---- Activity formatting
+  //
+  // `start` is the helper's local "YYYY-MM-DDTHH:MM" (older caches are
+  // migrated to it helper-side, so the legacy `date` field is never read
+  // here). A short or odd string still yields a day where it has one and no
+  // invented clock where it does not.
+  function activityDay(a) { return a ? root.parseDay(a.start) : null }
+
+  function activityClock(a) {
+    var m = String(a && a.start ? a.start : "").match(/T(\d{2}):(\d{2})/)
+    return m ? m[1] + ":" + m[2] : ""
+  }
+
+  // "Sep 22", with the year only when it is not this one — the list reaches
+  // back months for an infrequent exerciser, and "Jan 7" alone would claim
+  // the most recent January.
+  function activityDate(a) {
+    var d = root.activityDay(a)
+    if (!d) return ""
+    var s = root.monthNames[d.getMonth()] + " " + d.getDate()
+    return d.getFullYear() === new Date().getFullYear() ? s : s + " '" + String(d.getFullYear()).slice(-2)
+  }
+
+  // Name first (the one thing the user chose or saw as the title), then the
+  // type. `activityNames: false` makes the helper drop names entirely.
+  function activityTitle(a) {
+    if (!a) return ""
+    var n = typeof a.name === "string" ? a.name.replace(/^\s+|\s+$/g, "") : ""
+    if (n !== "") return n
+    var t = root.titleCase(a.type)
+    return t !== "" ? t : "Activity"
+  }
+
+  // Substring matches, because Garmin's typeKeys come in families
+  // (trail_running, treadmill_running, road_biking, indoor_cycling …) and
+  // the family is what the glyph means. Every codepoint was checked against
+  // the bar font's cmap with fc-list :charset= on the box, and
+  // rendered with pango-view to confirm it is the icon its name says
+  // (U+F01E5, the plan's dumbbell guess, is a duck).
+  function typeGlyph(typeKey) {
+    var t = String(typeKey || "").toLowerCase()
+    if (t.indexOf("run") !== -1) return "󰜎"          // nf-md-run, U+F070E
+    if (t.indexOf("cycl") !== -1 || t.indexOf("bik") !== -1) return "󰂣"  // nf-md-bike, U+F00A3
+    if (t.indexOf("hik") !== -1) return "󰵿"         // nf-md-hiking, U+F0D7F
+    if (t.indexOf("walk") !== -1) return "󰖃"        // nf-md-walk, U+F0583
+    if (t.indexOf("swim") !== -1) return "󰓣"        // nf-md-swim, U+F04E3
+    if (t.indexOf("strength") !== -1) return "󱅝"    // nf-md-weight_lifter, U+F115D
+    // Yoga, breathwork and meditation share the seated figure: all three are
+    // "sat still on purpose", and a runner for a breathing session reads wrong.
+    if (t.indexOf("yoga") !== -1 || t.indexOf("breath") !== -1 || t.indexOf("meditat") !== -1)
+      return "󱅻"                                     // nf-md-meditation, U+F117B
+    return "󰜎"
+  }
+
+  function fmtKm(km) {
+    var n = root.num(km)
+    return n === null ? "" : n.toFixed(2) + " km"
+  }
+
   // ---- Payload accessors (every one tolerates a missing branch)
   readonly property var bodyBattery: root.payload && root.payload.bodyBattery ? root.payload.bodyBattery : null
   readonly property var sleepInfo: root.payload && root.payload.sleep ? root.payload.sleep : null
@@ -265,7 +324,63 @@ Panel {
   readonly property var intensityInfo: root.payload && root.payload.intensityMinutes ? root.payload.intensityMinutes : null
   readonly property var floorsInfo: root.payload && root.payload.floors ? root.payload.floors : null
   readonly property var caloriesInfo: root.payload && root.payload.calories ? root.payload.calories : null
-  readonly property var activityInfo: root.payload && root.payload.lastActivity ? root.payload.lastActivity : null
+  // The helper persists only as many activities as the list page can show
+  // (ACTIVITY_ROWS in bin/garmin-widget), so every row here is reachable —
+  // no "and N more" line pointing at rows nobody can open. The input cap is
+  // the historyInputCap idea again: last.json is a file on disk, and a
+  // planted 100k-entry list must not be walked on every repaint.
+  readonly property int activityRows: 10
+  readonly property int activitiesInputCap: 100
+  readonly property var activities: {
+    var a = root.payload && root.payload.activities ? root.payload.activities : null
+    if (!a || a.length === undefined) return []
+    var n = Math.min(a.length, root.activitiesInputCap)
+    var out = []
+    for (var i = 0; i < n && out.length < root.activityRows; i++)
+      if (a[i] && typeof a[i] === "object") out.push(a[i])
+    return out
+  }
+  // The card shows the newest row. `lastActivity` is the same object as
+  // activities[0] in every 0.5 payload; it is only read as a fallback for a
+  // payload that somehow has the one without the other.
+  readonly property var activityInfo: root.activities.length > 0 ? root.activities[0]
+    : (root.payload && root.payload.lastActivity ? root.payload.lastActivity : null)
+
+  // ---- Carried-forward domains
+  //
+  // A secondary endpoint that failed on this fetch keeps its last cached value,
+  // and the helper lists its payload key in `carried`. Payload keys and card
+  // tokens are spelled differently, and this is the one place that knows the
+  // mapping — tests/test_hardening.py checks it against the helper's
+  // CARRY_KEYS, so a key added there without a token here fails a test rather
+  // than silently never dimming its card.
+  readonly property var carriedTokenMap: ({
+    "hrvStatus": "hrv",
+    "intensityMinutes": "intensity",
+    "activities": "activity",
+    "readiness": "readiness"
+  })
+  readonly property var carriedTokens: {
+    var c = root.payload && root.payload.carried ? root.payload.carried : null
+    var out = []
+    if (!c || c.length === undefined) return out
+    for (var i = 0; i < Math.min(c.length, 20); i++) {
+      // hasOwnProperty, not a bare lookup: a planted "toString" would
+      // otherwise find Object.prototype's function and count as a token.
+      var key = String(c[i])
+      if (!Object.prototype.hasOwnProperty.call(root.carriedTokenMap, key)) continue
+      var t = root.carriedTokenMap[key]
+      if (out.indexOf(t) === -1) out.push(t)
+    }
+    return out
+  }
+  function isCarried(token) { return root.carriedTokens.indexOf(String(token)) !== -1 }
+  // A carried card keeps its number but says it is old, on the card itself:
+  // the footer's freshness stamp is about the fetch, which did succeed.
+  function staleCaption(caption, token) {
+    if (!root.isCarried(token)) return caption
+    return caption === "" ? "stale" : caption + " · stale"
+  }
 
   // The custom card is not part of the Garmin payload at all — the Service
   // runs the user's command beside the fetch and hands over an already
@@ -892,22 +1007,35 @@ Panel {
     case "activity": {
       // The date is not decoration. The last activity can be weeks old, and a
       // duration with no date on it reads as "you did this today".
-      var type = root.titleCase(root.activityInfo ? root.activityInfo.type : "")
-      var mins = root.num(root.activityInfo ? root.activityInfo.durationMin : null)
-      var km = root.num(root.activityInfo ? root.activityInfo.distanceKm : null)
-      var when = root.activityInfo ? String(root.activityInfo.date || "") : ""
-      var meta = []
+      var act = root.activityInfo
+      var type = root.titleCase(act ? act.type : "")
+      var mins = root.num(act ? act.durationMin : null)
+      var km = root.num(act ? act.distanceKm : null)
+      var bpm = root.num(act ? act.avgHr : null)
+      var kcal = root.num(act ? act.kcal : null)
+      var when = root.activityDate(act)
+      // Date first: the caption elides from the right, and on a half-width
+      // dense card the tail is what goes. Heart rate and calories are
+      // dropped there outright — the list page one click away has them.
+      var meta = [when === "" ? "date unknown" : when]
       if (mins !== null) meta.push(root.fmtDuration(mins))
-      if (km !== null) meta.push(km.toFixed(2) + " km")
-      meta.push(when === "" ? "date unknown" : root.fmtDay(when))
+      if (km !== null) meta.push(root.fmtKm(km))
+      if (!dense && bpm !== null) meta.push(root.fmtNumber(bpm) + " bpm")
+      if (!dense && kcal !== null) meta.push(root.fmtSteps(kcal) + " kcal")
+      // The figure slot does not elide (MetricCard sizes it to its text), so
+      // a 48-character name would push the title off the card. The list page
+      // and its tooltip carry the full name.
+      var shown = act ? root.activityTitle(act) : ""
+      var fit = dense ? 12 : 24
+      if (shown.length > fit) shown = shown.slice(0, fit - 1) + "…"
       return {
         "kind": "metric",
-        "show": root.activityInfo !== null && (type !== "" || mins !== null || km !== null),
-        "icon": "󰜎",
+        "show": act !== null && (type !== "" || mins !== null || km !== null || root.activityTitle(act) !== "Activity"),
+        "icon": root.typeGlyph(act ? act.type : ""),
         // Two cards to a row leaves no space for "Last activity" — it elides
         // to "Last a…", which reads like a rendering bug rather than a title.
         "title": dense ? "Activity" : "Last activity",
-        "value": type === "" ? "—" : type,
+        "value": shown === "" ? "—" : shown,
         "caption": meta.join(" · ")
       }
     }
@@ -951,7 +1079,7 @@ Panel {
   // a full-width page has room for a chart that is actually readable.
   property string detailToken: ""
   readonly property bool detailMode: root.detailToken !== ""
-  readonly property var expandableTokens: ["battery", "sleep", "steps", "readiness", "rhr", "hrv", "calories", "curve"]
+  readonly property var expandableTokens: ["battery", "sleep", "steps", "readiness", "rhr", "hrv", "calories", "curve", "activity"]
   function expandable(token) { return root.expandableTokens.indexOf(String(token)) !== -1 }
 
   function openDetail(token) {
@@ -960,11 +1088,102 @@ Panel {
     // The curve slot draws the battery card when there is no curve; the
     // detail follows what is on screen, not the token.
     if (token === "curve" && !root.hasCurve) token = "battery"
+    // A detail page replaces the deck, and edit mode replaces it too — an IPC
+    // `detail` arriving mid-edit must not leave both flags up, with the edit
+    // list's key handling still live under a page that is not showing it.
+    root.editMode = false
+    root.activityCursor = 0
     root.detailToken = token
   }
   function closeDetail() { root.detailToken = "" }
   // A reopened panel starts on the deck, not on whatever was last inspected.
   onOpenedChanged: if (!root.opened) root.detailToken = ""
+
+  // ---- Activity list page
+  //
+  // The activity card's page is a list, not a week chart, so it branches off
+  // the shared detail chrome in a few places: the hero meta, the header
+  // figure and the footer hint below all check `activityPage`.
+  readonly property bool activityPage: root.detailToken === "activity"
+  property int activityCursor: 0
+
+  // Keyboard model: one integer, as in edit mode. Clamped here so a refresh
+  // that shortens the list never leaves the cursor on a row that is gone.
+  function activityMove(dy) {
+    var n = root.activityListRows.length
+    if (n === 0) return
+    root.activityCursor = Math.max(0, Math.min(n - 1, root.activityCursor + (dy > 0 ? 1 : -1)))
+  }
+
+  // Rows fully formatted here, like every other card and page: ActivityList
+  // only places them.
+  readonly property var activityListRows: {
+    var out = []
+    for (var i = 0; i < root.activities.length; i++) {
+      var a = root.activities[i]
+      var mins = root.num(a.durationMin), bpm = root.num(a.avgHr), kcal = root.num(a.kcal)
+      var title = root.activityTitle(a)
+      var type = root.titleCase(a.type)
+      var day = root.activityDay(a)
+      var clock = root.activityClock(a)
+      var row = {
+        "glyph": root.typeGlyph(a.type),
+        "title": title,
+        "dateText": root.activityDate(a),
+        // Bare numbers: the unit sits once in the column header rather
+        // than ten times down the column, which is what buys the name room.
+        "durationText": mins === null ? "" : root.fmtDuration(mins),
+        "distanceText": root.num(a.distanceKm) === null ? "" : root.num(a.distanceKm).toFixed(2),
+        "hrText": bpm === null ? "" : root.fmtNumber(bpm),
+        "kcalText": kcal === null ? "" : root.fmtSteps(kcal)
+      }
+      // The tooltip is the whole line, unelided: the one place a long name
+      // or a clipped column can be read in full.
+      var tip = [title]
+      if (type !== "" && type !== title) tip.push(type)
+      if (day) tip.push(root.weekdayNames[day.getDay()] + " " + row.dateText + (clock === "" ? "" : " " + clock))
+      if (row.durationText !== "") tip.push(row.durationText)
+      if (row.distanceText !== "") tip.push(row.distanceText + " km")
+      if (row.hrText !== "") tip.push(row.hrText + " bpm")
+      if (row.kcalText !== "") tip.push(row.kcalText + " kcal")
+      row.tip = tip.join(" · ")
+      out.push(row)
+    }
+    return out
+  }
+
+  // "this week 4 · 3h12m · 28.6 km" — but only when the list provably
+  // covers the whole week, i.e. its oldest row is older than six days ago.
+  // Otherwise a busy week could have more activities than the list holds,
+  // and the honest summary is just how many rows these are.
+  readonly property string activityWeekSummary: {
+    var rows = root.activities
+    if (rows.length === 0) return ""
+    var now = new Date()
+    var from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6)
+    var oldest = root.activityDay(rows[rows.length - 1])
+    if (!oldest || oldest.getTime() >= from.getTime())
+      return rows.length + " most recent"
+    var n = 0, mins = 0, km = 0
+    for (var i = 0; i < rows.length; i++) {
+      var d = root.activityDay(rows[i])
+      if (!d || d.getTime() < from.getTime()) continue
+      n++
+      mins += root.minutesOr0(rows[i].durationMin)
+      var k = root.num(rows[i].distanceKm)
+      if (k !== null) km += k
+    }
+    if (n === 0) return "none this week"
+    var parts = ["this week " + n, root.fmtDuration(mins)]
+    if (km > 0) parts.push(km.toFixed(1) + " km")
+    return parts.join(" · ")
+  }
+
+  readonly property string activityListHeading: {
+    var n = root.activityListRows.length
+    var h = n === 1 ? "Last activity" : "Last " + n + " activities"
+    return root.isCarried("activity") ? h + " · stale" : h
+  }
 
   // Seven calendar days ending on the newest history entry, each with its
   // history row (or null). The same walk stripFor does, kept separate so the
@@ -1426,8 +1645,14 @@ Panel {
       // (panel vanishes mid-rearrange) loses the user their place.
       onCloseRequested: root.detailMode ? root.closeDetail() : root.editMode ? root.endEdit() : root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onMoveRequested: function(dx, dy) { if (root.editMode) root.editMove(dx, dy) }
-      onActivateRequested: if (root.editMode) root.editActivate()
+      // The activity list's cursor is checked first: openDetail clears edit
+      // mode, so the two never overlap, but the order makes that impossible
+      // to get wrong from here.
+      onMoveRequested: function(dx, dy) {
+        if (root.activityPage) { if (dy !== 0) root.activityMove(dy) }
+        else if (root.editMode) root.editMove(dx, dy)
+      }
+      onActivateRequested: if (!root.activityPage && root.editMode) root.editActivate()
       onTextKey: function(t) {
         if (root.detailMode) {
           // The week view is read-only; refresh still works, edit does not.
@@ -1452,7 +1677,9 @@ Panel {
         PanelHero {
           width: parent.width
           title: "Garmin"
-          meta: root.detailMode ? root.detail.title + " · last 7 days" : root.editMode ? "Editing cards" : root.heroMeta
+          meta: root.activityPage ? "Recent activities"
+              : root.detailMode ? root.detail.title + " · last 7 days"
+              : root.editMode ? "Editing cards" : root.heroMeta
           foreground: root.foreground
           fontFamily: root.fontFamily
           // The pencil sits in the hero's own trailing slot, which reserves
@@ -1737,7 +1964,7 @@ Panel {
                     icon: cardSlot.card.icon || ""
                     title: cardSlot.card.title || ""
                     value: cardSlot.card.value || "—"
-                    caption: cardSlot.card.caption || ""
+                    caption: root.staleCaption(cardSlot.card.caption || "", cardSlot.modelData)
                     delta: cardSlot.card.delta || ""
                     deltaTone: cardSlot.card.deltaTone || ""
                     tone: cardSlot.card.tone || ""
@@ -1753,7 +1980,7 @@ Panel {
                     // Garmin staleness says nothing about somebody's own
                     // command, which was re-run on this very tick. Dimming it
                     // alongside the Garmin cards claims its number is old too.
-                    muted: root.showStale && cardSlot.modelData !== "custom"
+                    muted: (root.showStale || root.isCarried(cardSlot.modelData)) && cardSlot.modelData !== "custom"
                   }
                 }
               }
@@ -1769,9 +1996,13 @@ Panel {
 
           PanelSeparator { foreground: root.foreground }
 
+          // The week pages' header: icon, title, today's figure. The activity
+          // list has its own heading row (count + week summary) instead — the
+          // card's figure is one activity's name, not a figure for the page.
           Item {
+            visible: !root.activityPage
             width: parent.width
-            implicitHeight: Math.max(detailIcon.implicitHeight, detailTitle.implicitHeight, detailValue.implicitHeight)
+            implicitHeight: visible ? Math.max(detailIcon.implicitHeight, detailTitle.implicitHeight, detailValue.implicitHeight) : 0
 
             Text {
               textFormat: Text.PlainText
@@ -1817,6 +2048,7 @@ Panel {
           }
 
           WeekView {
+            visible: !root.activityPage
             width: parent.width
             days: root.detail.days
             variant: root.detail.variant
@@ -1834,10 +2066,26 @@ Panel {
             muted: root.showStale
           }
 
+          ActivityList {
+            visible: root.activityPage
+            width: parent.width
+            rows: root.activityListRows
+            cursor: root.activityCursor
+            heading: root.activityListHeading
+            summary: root.activityWeekSummary
+            foreground: root.foreground
+            accentColor: root.accentColor
+            dim: root.dim
+            fontFamily: root.fontFamily
+            muted: root.showStale || root.isCarried("activity")
+            onHovered: function(index) { root.activityCursor = index }
+          }
+
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "Hover a day for detail · Esc or the arrow to go back"
+            text: root.activityPage ? "↑↓ choose · Esc or the arrow to go back"
+                                    : "Hover a day for detail · Esc or the arrow to go back"
             color: root.dim
             opacity: 0.7
             font.family: root.fontFamily
