@@ -441,41 +441,68 @@ def build_payload(summary, sleep, as_of, extras=None):
     # Every extended key is always present — null when the endpoint was
     # unavailable — so the QML side can branch on null instead of undefined.
     payload["curve"] = build_curve(extras.get("bodyBattery"), extras.get("stress"))
-    payload["hrvStatus"] = build_hrv(extras.get("hrv"))
+    payload["hrvStatus"] = build_hrv(extras.get("hrvStatus"))
     payload["readiness"] = build_readiness(extras.get("readiness"))
-    payload["intensityMinutes"] = build_intensity(extras.get("intensity"))
+    payload["intensityMinutes"] = build_intensity(extras.get("intensityMinutes"))
     payload["floors"] = build_floors(summary)
     payload["calories"] = build_calories(summary)
     payload["lastActivity"] = build_last_activity(extras.get("lastActivity"))
     return payload
 
 
+# A sentinel distinct from None: _safe's caller must be able to tell "the
+# endpoint raised" from "the endpoint answered with nothing" — the first is
+# eligible to carry the previous cache forward (v0.5 A5), the second is a
+# real, current answer of "no data today" and must not be papered over with
+# yesterday's number. `object()` rather than a string/None because it must
+# never compare equal to anything a real response could contain.
+FAILED = object()
+
+# Extras keys eligible to carry the last cached value forward when the live
+# call raises (v0.5 A5). Named in payload-key space (not the extras dict's
+# own keys) since that's what cmd_fetch substitutes into. `curve` is
+# deliberately absent — an intraday series is day-bound; yesterday's curve
+# under today's label would be a lie even when marked stale.
+CARRY_KEYS = ("hrvStatus", "readiness", "intensityMinutes")
+
+
 def _safe(fn):
-    """Run one secondary API call; a failure nulls its key, nothing more.
+    """Run one secondary API call; a failure returns FAILED, nothing more.
 
     The extended metrics come from six separate endpoints, any of which can
     404 for a day with no data, or 500, or vanish in the next garminconnect
     release. One of them failing must never cost the user their body battery
     chip, so each is isolated here rather than sharing fetch's try block.
+    FAILED (not None) so the caller can tell a raised call apart from an
+    endpoint that genuinely answered "nothing for today".
     """
     try:
         return fn()
     except Exception:
-        return None
+        return FAILED
 
 
 def _fetch_extras(g, today, skip_body_battery=False):
-    # On a burst poll the ranged body-battery call already covers today (it is
-    # the same endpoint with an end date), so the day call is skipped and
-    # cmd_fetch fills the key from the window instead.
-    return {
+    """(extras, failed) — extras has FAILED replaced by None for the
+    builders below; failed is the set of extras keys (payload-key spelling)
+    whose live call raised, for cmd_fetch's carry-forward step.
+
+    On a burst poll the ranged body-battery call already covers today (it is
+    the same endpoint with an end date), so the day call is skipped and
+    cmd_fetch fills the key from the window instead — that skip is not a
+    failure, so it is never in `failed`.
+    """
+    raw = {
         "bodyBattery": None if skip_body_battery else _safe(lambda: g.get_body_battery(today)),
         "stress": _safe(lambda: g.get_stress_data(today)),
-        "hrv": _safe(lambda: g.get_hrv_data(today)),
+        "hrvStatus": _safe(lambda: g.get_hrv_data(today)),
         "readiness": _safe(lambda: g.get_training_readiness(today)),
-        "intensity": _safe(lambda: g.get_intensity_minutes_data(today)),
+        "intensityMinutes": _safe(lambda: g.get_intensity_minutes_data(today)),
         "lastActivity": _safe(lambda: g.get_last_activity()),
     }
+    failed = {k for k, v in raw.items() if v is FAILED}
+    extras = {k: (None if v is FAILED else v) for k, v in raw.items()}
+    return extras, failed
 
 def _secure_tokens() -> None:
     """Re-tighten tokens.json to 0600, best-effort.
@@ -539,6 +566,11 @@ def _load_cache():
         return None
     hint = cached.pop("hint", None)
     cached.pop("detail", None)
+    # `carried` is this helper's own bookkeeping for the fetch that produced
+    # the payload, not a fact about the cached data itself — a cached
+    # payload is a *success* payload and gets a fresh, empty `carried` from
+    # whichever code path serves it, exactly like `stale` above it.
+    cached.pop("carried", None)
     # The rest of the cached payload is still strings someone else may have
     # chosen: every one of them gets the same label-sized budget the live
     # build_* path applies, walked recursively so nothing rides in nested.
@@ -575,14 +607,35 @@ def cmd_fetch(week=False) -> int:
         burst = week or fetched_on != today
         summary = g.get_user_summary(today) or {}
         sleep = g.get_sleep_data(today) or {}
-        extras = _fetch_extras(g, today, skip_body_battery=burst)
+        extras, failed_keys = _fetch_extras(g, today, skip_body_battery=burst)
         window = _fetch_window(g, _window_dates(today)[0], today) if burst else {}
         if burst:
             # The ranged answer carries today; fall back to the day call only
             # when the ranged one failed, so the curve is never silently lost.
-            extras["bodyBattery"] = (_today_from_range(window.get("bodyBattery"), today)
-                                     or _safe(lambda: g.get_body_battery(today)))
+            bb = _today_from_range(window.get("bodyBattery"), today)
+            if bb is None:
+                bb = _safe(lambda: g.get_body_battery(today))
+                if bb is FAILED:
+                    bb = None
+            extras["bodyBattery"] = bb
         payload = build_payload(summary, sleep, now, extras)
+        # Per-domain freshness (v0.5 A5): a secondary endpoint that *raised*
+        # keeps its last cached value (marked in `carried`) instead of
+        # blanking its card — but only for keys in CARRY_KEYS; an endpoint
+        # that simply answered "nothing for today" (empty/None body, not an
+        # exception) is a real, current answer and is never carried.
+        carried = []
+        to_carry = failed_keys & set(CARRY_KEYS)
+        if to_carry:
+            cached = _load_cache() or {}
+            for key in CARRY_KEYS:
+                if key not in to_carry:
+                    continue
+                cached_value = cached.get(key)
+                if cached_value is not None:
+                    payload[key] = cached_value
+                carried.append(key)
+        payload["carried"] = carried
     except gc.GarminConnectAuthenticationError:
         return emit({"ok": False, "error": "auth-expired",
                      "hint": "run: garmin-widget login"})
@@ -590,6 +643,10 @@ def cmd_fetch(week=False) -> int:
         cached = _load_cache()
         if cached is not None:
             cached["stale"] = True
+            # A stale payload already says everything; it carries nothing
+            # forward of its own (that bookkeeping belongs to a fetch that
+            # actually ran), but the key is always present for the panel.
+            cached["carried"] = []
             # detail is the exception *class name* only, same rule as the
             # no-cache branch below — and it rides on the emitted object
             # only, not on `cached` before this point, so it never reaches
