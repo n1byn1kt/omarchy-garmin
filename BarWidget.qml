@@ -73,6 +73,28 @@ BarWidget {
     }
   }
 
+  // ---- Demo mode (v0.5)
+  //
+  // Synthetic data, no account, no network: `omarchy bar set
+  // io.github.n1byn1kt.garmin demoMode true --json` (false to leave). The
+  // setting is read here, but the Service only ever follows the *primary*
+  // instance's value (QC amendment 1): a change on any screen fans out as an
+  // intent, exactly like requestRefresh(), and every peer re-reads the
+  // primary's setting rather than trusting its own.
+  readonly property bool demoSetting: root.setting("demoMode", false) === true
+  readonly property string demoOffCommand: "omarchy bar set " + root.moduleName + " demoMode false --json"
+  onDemoSettingChanged: root.broadcast("syncDemoMode")
+
+  function syncDemoMode() {
+    var items = root.peers()
+    var primary = items.length > 0 && items[0] ? items[0] : root
+    service.demoMode = primary.demoSetting === true
+  }
+
+  // Before the Service's first poll: silent (the toggle handler is gated on
+  // its _started), so the very first fetch is already the right command.
+  Component.onCompleted: service.demoMode = root.demoSetting
+
   Service {
     id: service
     pollMinutes: Number(root.setting("pollMinutes", 30)) || 30
@@ -242,6 +264,9 @@ BarWidget {
     var t = root.metricGlyph + root.metricGap + (root.showNumbers ? root.metricText : "—")
     if (root.showNumbers && root.showSteps && root.stepCount !== null)
       t += "  " + (root.stepCount / 1000).toFixed(1) + "k"
+    // Q1: a word, not a glyph — the one mark nobody has to look up. Not a
+    // dimmed chip either: dim means degraded, and demo is not broken.
+    if (root.showNumbers && service.demo) t += " demo"
     if (root.showStaleMark) t += " ·"
     return t
   }
@@ -290,8 +315,11 @@ BarWidget {
   }
 
   readonly property string tooltip: {
-    var lines = [root.metricLabel + (root.showNumbers ? " " + root.metricText : "")]
-    lines.push(root.stateLabel)
+    var lines = []
+    if (service.demo) lines.push("DEMO DATA — synthetic, not from your account")
+    lines.push(root.metricLabel + (root.showNumbers ? " " + root.metricText : ""))
+    // "as of demo" says nothing; how to leave is the useful second line.
+    lines.push(service.demo ? "turn off: " + root.demoOffCommand : root.stateLabel)
     if (service.lastError !== "" && service.state !== "live") lines.push(service.lastError)
     // Prefixed, because a failing custom command must never read like Garmin
     // being down — it is the user's own script, and only its card is affected.
@@ -408,6 +436,8 @@ BarWidget {
     running: true
     onTriggered: {
       root.syncIpc()
+      // Peers are registered now, so "the primary's setting" means something.
+      root.syncDemoMode()
       root._ipcSettled = true
     }
   }

@@ -29,7 +29,8 @@
       "showSteps": false,
       "stepsGoalFallback": 10000,
       "panelMetrics": "curve,sleep,steps,readiness,rhr",
-      "customCommand": ""
+      "customCommand": "",
+      "demoMode": false
     },
     "schema": [
       {
@@ -83,6 +84,13 @@
         "label": "Command for the 'custom' card",
         "defaultValue": "",
         "description": "Must print one JSON object: {title, value, caption, meter:{value,max}, tone}. Runs as you, 9s timeout, 8KB output cap."
+      },
+      {
+        "key": "demoMode",
+        "type": "boolean",
+        "label": "Demo mode",
+        "defaultValue": false,
+        "description": "Synthetic data, no account, no network. Clearly marked. For trying the widget and for screenshots."
       }
     ]
   }

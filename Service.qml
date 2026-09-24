@@ -41,6 +41,24 @@ Item {
 
   property int pollMinutes: 30
 
+  // ---- Demo mode (v0.5 D6 + QC amendment 1)
+  //
+  // Set by the owner from the *primary* instance's `demoMode` setting, so
+  // every screen agrees on which world it is in. On, `refresh()` runs
+  // `garmin-widget demo` instead of `fetch`; the result flows through
+  // applyPayload like any other, so cards, strips and detail pages need no
+  // demo branches of their own. `demo` is what the UI marks on: the
+  // *payload's* flag, so what is drawn is labelled by what it is.
+  property bool demoMode: false
+  readonly property bool demo: !!root.payload && root.payload.demo === true
+
+  // Bumped on every demo toggle. A fetch started under the other mode may
+  // still be running; its answer is for a world the user just left, so
+  // onExited compares generations and drops it instead of applying it.
+  property int _fetchGen: 0
+  property int _runGen: 0
+  property bool _pendingRefresh: false
+
   // Gate the owner can use to decide, at each tick, whether this instance is
   // allowed to spawn the helper. The bar builds one widget per screen, and
   // three monitors should not mean three Garmin API clients. Checked at fire
@@ -161,11 +179,22 @@ Item {
     // before the `running` guard below — a fetch already in flight must not
     // also swallow the refresh of a card that has nothing to do with it.
     root.runCustom()
-    if (fetchProcess.running) return
+    if (fetchProcess.running) {
+      // Still running for the mode the user just left: not killed (a fetch
+      // mid-login is not something to SIGTERM on a whim), but queued behind,
+      // so the new mode's answer follows as soon as the old one is dropped.
+      if (root._runGen !== root._fetchGen) root._pendingRefresh = true
+      return
+    }
     _stdout = ""
     root.lastHint = ""
-    var burst = week === true
-    var cmd = burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
+    root._runGen = root._fetchGen
+    var burst = week === true && !root.demoMode
+    // Demo output cannot change within a day, so a "week" refresh is the
+    // same demo call; `--weight` rides along so the demo follows the same
+    // one rule the real fetch does for the weight card.
+    var cmd = root.demoMode ? [root.helperPath, "demo"]
+      : burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
     if (root.weightEnabled) cmd.push("--weight")
     fetchProcess.command = cmd
     // Fourteen sequential Garmin calls with the library's own retries can
@@ -190,6 +219,9 @@ Item {
     }
 
     if (payload.ok === true) {
+      // Belt to the generation counter's braces: a payload whose demo flag
+      // disagrees with the mode we are in is never shown under it.
+      if ((payload.demo === true) !== root.demoMode) return
       root.payload = payload
       // A stale payload carries `detail` — the failing call's exception class
       // name, nothing attacker-chosen — so the tooltip can say *why* it's
@@ -325,7 +357,10 @@ Item {
     // already in flight for the *previous* command/enabled value is stopped
     // too — otherwise its output would land after this and either resurrect
     // a card that should be gone or overwrite it with a stale one.
-    if (String(root.customCommand) === "" || !root.customEnabled) {
+    //
+    // Demo mode counts as "off" (QC amendment 10): a real script's real
+    // output has no place beside synthetic cards in a screenshot.
+    if (String(root.customCommand) === "" || !root.customEnabled || root.demoMode) {
       if (customProcess.running) {
         customProcess.running = false
         customWatchdog.stop()
@@ -482,7 +517,7 @@ Item {
       // The command/enabled toggle can flip while this process was still
       // running (edit mode is quick) — its output belongs to a config that
       // no longer applies, so it is discarded rather than applied late.
-      if (String(root.customCommand) === "" || !root.customEnabled) {
+      if (String(root.customCommand) === "" || !root.customEnabled || root.demoMode) {
         root.customCard = null
         root.customError = ""
         return
@@ -525,12 +560,53 @@ Item {
   // The custom card rides along: it is the primary that ran the command, and a
   // second screen re-running it would be a second copy of somebody's script on
   // every tick. `undefined` (an older peer) leaves this instance's card alone.
+  //
+  // A payload from the other world is ignored (QC amendment 1): under local
+  // demoMode only `demo: true` is taken, and out of it never — a primary
+  // that has not caught up with a toggle yet must not paint real numbers
+  // under this screen's demo banner, or demo numbers into its real panel.
+  // In demo the custom card is not adopted either (amendment 10).
   function adopt(state, payload, lastError, customCard, customError) {
+    var isDemo = !!payload && payload.demo === true
+    if (payload && isDemo !== root.demoMode) return
     root.payload = payload
     root.state = String(state)
     root.lastError = String(lastError || "")
+    if (root.demoMode) {
+      root.customCard = null
+      root.customError = ""
+      return
+    }
     if (customCard !== undefined) root.customCard = customCard
     if (customError !== undefined) root.customError = String(customError || "")
+  }
+
+  // The toggle. Guarded by _started so the owner's initial assignment (made
+  // before the first poll) is not itself a toggle. Everything from the old
+  // world goes — payload, error, hint, custom card — and the poll gate
+  // decides who fetches the new one: only the primary does, its peers get
+  // it through publish()/adopt() as usual.
+  onDemoModeChanged: {
+    if (!root._started) return
+    root._fetchGen++
+    root.payload = null
+    root.state = "loading"
+    root.lastError = ""
+    root.lastHint = ""
+    root.customCard = null
+    root.customError = ""
+    // Nothing is published here: every peer resets itself through its own
+    // onDemoModeChanged (the owner syncs them all), and the new payload is
+    // published when it lands.
+    root.poll()
+  }
+
+  // The dropped answer of a previous mode's fetch: nothing is applied, and
+  // the refresh that queued behind it runs now.
+  function _finishStaleRun() {
+    if (!root._pendingRefresh) return
+    root._pendingRefresh = false
+    root.poll()
   }
 
   property string _stdout: ""
@@ -544,6 +620,10 @@ Item {
       var timedOut = watchdog.tripped
       watchdog.stop()
       watchdog.tripped = false
+      if (root._runGen !== root._fetchGen) {
+        root._finishStaleRun()
+        return
+      }
       if (timedOut) return  // the watchdog already recorded the failure
       root.applyPayload(String(fetchStdout.text || root._stdout || ""))
     }
@@ -561,6 +641,9 @@ Item {
       if (!fetchProcess.running) return
       watchdog.tripped = true
       fetchProcess.running = false
+      // A run from the mode the user left has no failure to report here;
+      // onExited drops it and starts the queued refresh.
+      if (root._runGen !== root._fetchGen) return
       // Named explicitly rather than left to onExited's empty stdout, so the
       // tooltip says "timed out" instead of "unparseable helper output".
       root.fail("api-error", "helper timed out")
@@ -572,7 +655,9 @@ Item {
     // Floored rather than trusted: a mis-typed pollMinutes of 0 would hammer
     // Garmin's API from a widget nobody is looking at.
     interval: Math.max(5, Number(root.pollMinutes) || 30) * 60 * 1000
-    running: true
+    // The demo's output cannot change within a day, so re-polling it is
+    // noise; startup, a toggle and a manual refresh still run it.
+    running: !root.demoMode
     repeat: true
     onTriggered: root.poll()
   }

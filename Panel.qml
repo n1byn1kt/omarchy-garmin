@@ -151,9 +151,20 @@ Panel {
     case "offline": return "Offline"
     case "api-error": return "Garmin API error"
     case "stale": return "Showing last known data"
-    default: return "Today"
+    default: return root.payloadDemo ? "Demo data" : "Today"
     }
   }
+
+  // ---- Demo mode (v0.5 D7): impossible to mistake for real data
+  //
+  // Every mark keys off the payload's own flag, not the setting, so a
+  // screen is labelled by what it is actually drawing. The command is the
+  // host's when there is one (it knows its own module id), else the literal.
+  readonly property string demoOffCommand:
+    root.hostWidget && typeof root.hostWidget.demoOffCommand === "string"
+      ? String(root.hostWidget.demoOffCommand)
+      : "omarchy bar set io.github.n1byn1kt.garmin demoMode false --json"
+  readonly property string demoSuffix: root.payloadDemo ? " · demo" : ""
 
   // ---- Formatting
   //
@@ -748,6 +759,8 @@ Panel {
     // under a "not signed in" panel claims a freshness the panel is otherwise
     // refusing to show.
     if (!root.showRows) return ""
+    // asOf is the literal "demo" there; "as of demo" would read like a clock.
+    if (root.payloadDemo) return "demo data · nothing fetched"
     var clock = root.fmtClock(root.payload ? root.payload.asOf : "")
     if (clock === "") return root.showStale ? "stale" : ""
     return "as of " + clock + (root.showStale ? " · stale" : "")
@@ -1865,6 +1878,12 @@ Panel {
         else if (root.editMode) root.editActivate()
       }
       onTextKey: function(t) {
+        // Before every mode branch (QC amendment 11): the banner is on every
+        // page, so its copy key works on every page.
+        if ((t === "c" || t === "C") && root.payloadDemo) {
+          root.copy(root.demoOffCommand)
+          return
+        }
         if (root.detailMode) {
           // The week view is read-only; refresh still works, edit does not.
           if (t === "r" || t === "R") root.refresh(true)
@@ -1888,10 +1907,10 @@ Panel {
         PanelHero {
           width: parent.width
           title: "Garmin"
-          meta: root.activityDetailOpen ? "Activity"
-              : root.activityPage ? "Recent activities"
-              : root.detailMode ? root.detail.title + " · last 7 days"
-              : root.editMode ? "Editing cards" : root.heroMeta
+          meta: root.activityDetailOpen ? "Activity" + root.demoSuffix
+              : root.activityPage ? "Recent activities" + root.demoSuffix
+              : root.detailMode ? root.detail.title + " · last 7 days" + root.demoSuffix
+              : root.editMode ? "Editing cards" + root.demoSuffix : root.heroMeta
           foreground: root.foreground
           fontFamily: root.fontFamily
           // The pencil sits in the hero's own trailing slot, which reserves
@@ -1919,6 +1938,37 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
             }
+          }
+        }
+
+        // ---- Demo banner: under the hero on every page, urgent-coloured, with
+        // the way out spelled as a command (copyable with `c`, the same
+        // affordance the guidance command has). Shown in edit mode too — a
+        // layout arranged for a screenshot is still arranged over fiction.
+        Column {
+          visible: root.payloadDemo
+          width: parent.width
+          spacing: Style.space(2)
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: "Demo data — synthetic, not from your account"
+            color: root.urgentColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: (root.copied ? "Copied: " : "Turn off: ") + root.demoOffCommand + (root.copied ? "" : "  (c copies)")
+            color: root.urgentColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
           }
         }
 
