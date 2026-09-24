@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """garmin-widget — Garmin Connect helper for the io.github.n1byn1kt.garmin Omarchy plugin.
 
+Subcommands: fetch [--week] [--weight] (default) | login | status |
+prefs get|set <key> <value> | demo [--weight] (synthetic data, no account,
+nothing read or written).
+
 Contract: every subcommand prints exactly one JSON object to stdout and
 exits 0. Errors are data: {"ok": false, "error": "<category>"} with
 category in: deps | no-tokens | auth-expired | offline | api-error.
@@ -8,6 +12,7 @@ category in: deps | no-tokens | auth-expired | offline | api-error.
 import datetime
 import json
 import os
+import random
 import stat
 import sys
 import tempfile
@@ -221,6 +226,8 @@ def _dispatch(argv) -> int:
         return cmd_login()
     if cmd == "prefs":
         return cmd_prefs(argv[1:])
+    if cmd == "demo":
+        return cmd_demo(weight="--weight" in argv[1:])
     return emit({"ok": False, "error": "api-error", "detail": "unknown-command"})
 
 def main(argv) -> int:
@@ -230,8 +237,12 @@ def main(argv) -> int:
     from a login with no stdin, an AttributeError after a garminconnect
     upgrade — would blank the chip with "unparseable helper output" and give
     the user nothing to act on. Every bug lands here as an api-error instead.
+
+    `demo` never re-execs: it is stdlib only and exists precisely for a box
+    that has no venv (and no account) yet, so it must not depend on either.
     """
-    _maybe_reexec_into_venv(argv)
+    if not (argv and argv[0] == "demo"):
+        _maybe_reexec_into_venv(argv)
     try:
         return _dispatch(argv)
     except Exception as e:
@@ -972,6 +983,13 @@ def _load_cache():
         return None
     if not isinstance(cached, dict):
         return None
+    # A demo payload is fiction (v0.5 QC amendment 2): refused outright, not
+    # stripped of its flag — stripped, it would be served as stale real data
+    # or carried into a real card. cmd_demo never writes last.json, so one
+    # only gets here by hand or by a bug; either way there is no cache.
+    if cached.get("demo") is True:
+        return None
+    cached.pop("demo", None)
     hint = cached.pop("hint", None)
     cached.pop("detail", None)
     # `carried` is this helper's own bookkeeping for the fetch that produced
@@ -1459,17 +1477,290 @@ def _update_history(payload, today, window=None, burst=False, readiness_backfill
         cached, fetched_on = _load_history()
         rows, fetched_on = _merge_history(cached, fetched_on, payload, today,
                                           window, burst)
-        if readiness_backfill:
-            by_date = {r.get("date"): r for r in rows}
-            for d, score in readiness_backfill.items():
-                row = by_date.get(d)
-                if row is not None and row.get("readiness") is None:
-                    row["readiness"] = score
+        _apply_readiness_backfill(rows, readiness_backfill)
         _atomic_write(HISTORY_PATH, {"windowFetchedOn": fetched_on,
                                      "days": rows}, ".history-")
         return rows
     except Exception:
         return []
+
+
+def _apply_readiness_backfill(rows, readiness_backfill):
+    """Fill a null readiness from {date: score}, in place. Pure.
+
+    Split out of _update_history so the demo can run the very same rule
+    over its synthetic week without the load/write around it.
+    """
+    if not readiness_backfill:
+        return
+    by_date = {r.get("date"): r for r in rows}
+    for d, score in readiness_backfill.items():
+        row = by_date.get(d)
+        if row is not None and row.get("readiness") is None:
+            row["readiness"] = score
+
+
+# ---- demo ------------------------------------------------------------------
+#
+# `garmin-widget demo` prints a full payload made from synthetic data, for
+# trying the widget without an account and for screenshots (v0.5 D1-D5).
+#
+# The data is made as *raw Garmin-shaped responses* — what get_user_summary,
+# get_sleep_data, get_stress_data, the ranged week calls, get_activities and
+# get_weigh_ins answer — and pushed through the same builders a live fetch
+# uses (build_payload, _merge_history, build_activities, build_weight). A
+# builder regression therefore breaks the demo too, and the demo can never
+# carry a field a live payload cannot.
+#
+# Nothing is read or written: no tokens, no cache, no history, no prefs. The
+# history merge runs against an empty cache. Stdlib only, dispatched before
+# the venv re-exec (main()), so it works on a box with no venv at all.
+#
+# Deterministic: a fixed seed and a fixed synthetic clock, with dates anchored
+# on the real today so weekday labels are current — the same output, byte for
+# byte, for a given calendar day.
+
+DEMO_SEED = 0x6A726D6E
+DEMO_CLOCK = "18:40"   # most of a day, so the curve is not a morning stub
+
+# Week tables, indexed by `back` (0 = today ... 6). Today's column matches
+# the summary/sleep answers below, so the merge's "live beats window" rule
+# has nothing to disagree about.
+_DEMO_STEPS = (7480, 10350, 5820, 3900, 11040, 8760, 6230)
+_DEMO_STEP_GOALS = (9000, 9000, 8500, 9500, 9000, 8500, 9500)
+_DEMO_SLEEP_MIN = (432, 405, 470, 365, 441, 389, 452)
+_DEMO_SLEEP_SCORE = (79, 74, 84, 61, 80, 70, 82)
+_DEMO_AWAKE_MIN = (18, 26, 12, 41, 15, 30, 22)
+_DEMO_RHR = (51, 50, 52, 55, 49, 51, 53)
+_DEMO_HRV = (52, 55, 49, 41, 58, 50, 47)
+_DEMO_BB_HIGH = (88, 74, 91, 79, 86, 82, 77)
+_DEMO_BB_LOW = (34, 22, 38, 12, 30, 27, 19)
+_DEMO_BB_CHARGED = (54, 52, 70, 67, 56, 55, 58)
+_DEMO_BB_DRAINED = (47, 66, 44, 61, 59, 40, 63)
+_DEMO_STRESS = (32, 28, 36, 44, 25, 30, 38)
+_DEMO_CAL_ACTIVE = (640, 510, 910, 380, 720, 560, 450)
+_DEMO_CAL_RESTING = 1670
+_DEMO_READINESS = (68, 72, 83, 44, 77, 61, 58)
+
+# (back, hour, minute, typeKey, name, minutes, km, avgHr, maxHr, kcal, elevM)
+# Ten rows (= ACTIVITY_ROWS) over sixteen days, every card family covered.
+_DEMO_ACTIVITIES = (
+    (0, 7, 5, "running", "Morning Run", 46, 8.12, 146, 172, 498, 64),
+    (1, 18, 20, "road_biking", "Evening Ride", 84, 31.6, 131, 163, 742, 318),
+    (2, 12, 30, "strength_training", "Lunch Strength", 38, None, 112, 149, 236, None),
+    (4, 9, 15, "hiking", "Ridge Loop", 172, 11.4, 118, 151, 961, 642),
+    (5, 6, 50, "lap_swimming", "Pool Swim", 41, 1.85, 127, 158, 364, None),
+    (6, 17, 45, "running", "Tempo Intervals", 52, 9.46, 158, 181, 603, 41),
+    (8, 8, 0, "walking", "Park Walk", 64, 5.23, 96, 118, 281, 22),
+    (10, 16, 10, "cycling", "Commute Home", 29, 11.2, 124, 150, 268, 76),
+    (12, 19, 30, "yoga", "Yoga Flow", 45, None, 88, 109, 142, None),
+    (15, 7, 40, "running", "Long Run", 108, 19.8, 141, 166, 1204, 187),
+)
+
+# Sparse weigh-ins over WEIGHT_DAYS (back, hour, kg): drifting gently down,
+# with gaps, the way a real bathroom scale gets used.
+_DEMO_WEIGH_INS = ((0, 7, 74.6), (2, 7, 74.9), (4, 8, 75.1), (7, 7, 75.0),
+                   (9, 7, 75.4), (12, 8, 75.3), (15, 7, 75.8), (18, 7, 75.6),
+                   (21, 8, 76.1), (25, 7, 75.9), (28, 7, 76.3))
+
+
+def _demo_ms(day, hh, mm):
+    return int(datetime.datetime.combine(day, datetime.time(hh, mm)).timestamp() * 1000)
+
+
+def _demo_curves(today, rng):
+    """(bodyBattery rows, stress rows) — 3-minute samples, 00:00..DEMO_CLOCK.
+
+    Body battery charges from 34 at midnight to 88 by 07:10, then steps down
+    through the day to 41 at the clock; stress runs roughly inverse, 12..71,
+    with two runs of -1 (watch off the wrist) so the sentinel-dropping path
+    in _series stays exercised by the demo too.
+    """
+    hh, mm = (int(x) for x in DEMO_CLOCK.split(":"))
+    end, peak = hh * 60 + mm, 7 * 60 + 10
+    t0 = _demo_ms(today, 0, 0)
+    bb, stress = [], []
+    for minute in range(0, end + 1, 3):
+        if minute <= peak:
+            level = 34 + (88 - 34) * (minute / peak) ** 0.8
+        else:
+            f = (minute - peak) / (end - peak)
+            # A staircase rather than a ramp: drains come in efforts.
+            level = 88 - (88 - 41) * (0.55 * f + 0.45 * (int(f * 6) / 6))
+        level = max(34, min(88, round(level + rng.uniform(-1, 1))))
+        if minute == 0:
+            level = 34
+        elif peak <= minute < peak + 3:
+            level = 88
+        elif minute + 3 > end:
+            level = 41
+        base = 12 + (71 - 12) * (1 - (level - 34) / (88 - 34))
+        s = max(12, min(71, round(base * (0.55 if minute < peak else 1.0)
+                                  + rng.uniform(-6, 6))))
+        if 600 <= minute < 615 or 930 <= minute < 942:
+            s = -1
+        ts = t0 + minute * 60_000
+        bb.append([ts, level])
+        stress.append([ts, s])
+    return bb, stress
+
+
+def _demo_raw(today, weight=False):
+    """The synthetic Garmin responses one burst fetch would have received.
+
+    Returns (summary, sleep, extras, window, readiness_backfill) in exactly
+    the shapes cmd_fetch hands the builders (tests/fixtures.py records the
+    real layouts these copy).
+    """
+    rng = random.Random(DEMO_SEED)
+    day = lambda back: (today - datetime.timedelta(days=back)).isoformat()
+    backs = range(HISTORY_DAYS - 1, -1, -1)
+    # The week's peak lands on its Saturday (a past one: today keeps the
+    # figure the summary reports), so the steps strip has a shape to it.
+    steps = [13200 if b > 0 and (today - datetime.timedelta(days=b)).weekday() == 5
+             else _DEMO_STEPS[b] for b in range(HISTORY_DAYS)]
+
+    summary = {
+        "bodyBatteryMostRecentValue": 41, "bodyBatteryHighestValue": 88,
+        "bodyBatteryLowestValue": 34,
+        "totalSteps": _DEMO_STEPS[0], "dailyStepGoal": _DEMO_STEP_GOALS[0],
+        "restingHeartRate": _DEMO_RHR[0],
+        "floorsAscended": 9, "userFloorsAscendedGoal": 10,
+        "totalKilocalories": _DEMO_CAL_RESTING + _DEMO_CAL_ACTIVE[0],
+        "activeKilocalories": _DEMO_CAL_ACTIVE[0],
+    }
+    sleep = {"dailySleepDTO": {
+        "calendarDate": day(0), "sleepTimeSeconds": _DEMO_SLEEP_MIN[0] * 60,
+        "sleepScores": {"overall": {"value": _DEMO_SLEEP_SCORE[0]}}}}
+
+    bb_rows, stress_rows = _demo_curves(today, rng)
+    stress = {
+        "calendarDate": day(0),
+        "stressValueDescriptorsDTOList": [{"index": 0, "key": "timestamp"},
+                                          {"index": 1, "key": "stressLevel"}],
+        "stressValuesArray": stress_rows,
+        "bodyBatteryValueDescriptorsDTOList": [
+            {"bodyBatteryValueDescriptorIndex": 0, "bodyBatteryValueDescriptorKey": "timestamp"},
+            {"bodyBatteryValueDescriptorIndex": 1, "bodyBatteryValueDescriptorKey": "bodyBatteryStatus"},
+            {"bodyBatteryValueDescriptorIndex": 2, "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"},
+            {"bodyBatteryValueDescriptorIndex": 3, "bodyBatteryValueDescriptorKey": "bodyBatteryVersion"}],
+        "bodyBatteryValuesArray": [[t, "MEASURED", v, 3.0] for t, v in bb_rows],
+    }
+
+    # Sleep stages: deep/light/rem sum to the night's total exactly.
+    def stages(back):
+        total = _DEMO_SLEEP_MIN[back]
+        deep, rem = round(total * 0.19), round(total * 0.23)
+        return deep, total - deep - rem, rem
+
+    bb_desc = [{"bodyBatteryValueDescriptorIndex": 0, "bodyBatteryValueDescriptorKey": "timestamp"},
+               {"bodyBatteryValueDescriptorIndex": 1, "bodyBatteryValueDescriptorKey": "bodyBatteryLevel"}]
+
+    def bb_day(back):
+        d = today - datetime.timedelta(days=back)
+        if back == 0:
+            values = bb_rows
+        else:
+            values = [[_demo_ms(d, 0, 0), None],
+                      [_demo_ms(d, 1, 0), _DEMO_BB_LOW[back]],
+                      [_demo_ms(d, 7, 0), _DEMO_BB_HIGH[back]],
+                      [_demo_ms(d, 22, 0), _DEMO_BB_LOW[back] + 6]]
+        return {"date": day(back), "charged": _DEMO_BB_CHARGED[back],
+                "drained": _DEMO_BB_DRAINED[back],
+                "bodyBatteryValueDescriptorDTOList": bb_desc,
+                "bodyBatteryValuesArray": values}
+
+    window = {
+        "steps": [{"calendarDate": day(b), "totalSteps": steps[b],
+                   "stepGoal": _DEMO_STEP_GOALS[b]} for b in backs],
+        "rhr": [{"calendarDate": day(b), "value": float(_DEMO_RHR[b])} for b in backs],
+        "sleep": [{"calendarDate": day(b), "values": {
+            "sleepScore": _DEMO_SLEEP_SCORE[b],
+            "totalSleepTimeInSeconds": _DEMO_SLEEP_MIN[b] * 60,
+            "deepTime": stages(b)[0] * 60, "lightTime": stages(b)[1] * 60,
+            "remTime": stages(b)[2] * 60, "awakeTime": _DEMO_AWAKE_MIN[b] * 60}}
+            for b in backs],
+        "bodyBattery": [bb_day(b) for b in backs],
+        "hrv": {"hrvSummaries": [
+            {"calendarDate": day(b), "weeklyAvg": 49, "lastNightAvg": _DEMO_HRV[b],
+             "baseline": {"balancedLow": 44, "balancedUpper": 63},
+             "status": "BALANCED"} for b in backs]},
+        "calories": [{"calendarDate": day(b), "active": float(_DEMO_CAL_ACTIVE[b]),
+                      "resting": float(_DEMO_CAL_RESTING),
+                      "total": float(_DEMO_CAL_RESTING + _DEMO_CAL_ACTIVE[b])}
+                     for b in backs],
+        "stress": [{"calendarDate": day(b), "values": {
+            "overallStressLevel": _DEMO_STRESS[b],
+            "restStressDuration": (560 - _DEMO_STRESS[b] * 3) * 60,
+            "lowStressDuration": (300 + _DEMO_STRESS[b]) * 60,
+            "mediumStressDuration": (120 + _DEMO_STRESS[b] * 2) * 60,
+            "highStressDuration": (20 + _DEMO_STRESS[b]) * 60}} for b in backs],
+    }
+
+    activities = []
+    for i, (back, hh, mm, type_key, name, mins, km, avg, mx, kcal, elev) in enumerate(_DEMO_ACTIVITIES):
+        start = datetime.datetime.combine(today - datetime.timedelta(days=back),
+                                          datetime.time(hh, mm))
+        activities.append({
+            "activityId": 90000001 + i,
+            "activityName": name,
+            "activityType": {"typeKey": type_key},
+            "startTimeLocal": start.strftime("%Y-%m-%d %H:%M:%S"),
+            # A fixed offset: only the ordering matters, and it must be the
+            # same on every box for the output to be byte-identical.
+            "startTimeGMT": (start - datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": float(mins * 60),
+            "distance": float(km * 1000) if km else 0.0,
+            "averageHR": float(avg), "maxHR": float(mx),
+            "calories": float(kcal),
+            "elevationGain": float(elev) if elev else 0.0,
+        })
+
+    extras = {
+        # A burst takes today's body battery from the ranged answer, as
+        # cmd_fetch does, so the demo walks that path too.
+        "bodyBattery": _today_from_range(window["bodyBattery"], day(0)),
+        "stress": stress,
+        "hrvStatus": {"hrvSummary": {"lastNightAvg": _DEMO_HRV[0], "weeklyAvg": 49,
+                                     "status": "BALANCED",
+                                     "baseline": {"balancedLow": 44, "balancedUpper": 63}}},
+        "readiness": [{"score": _DEMO_READINESS[0], "level": "MODERATE",
+                       "timestamp": day(0) + "T07:12:00.0"}],
+        "intensityMinutes": {"weeklyTotal": 112, "weekGoal": 150},
+        "activities": activities,
+    }
+    if weight:
+        rows = []
+        for back, hh, kg in _DEMO_WEIGH_INS:
+            d = today - datetime.timedelta(days=back)
+            rows.append({"calendarDate": d.isoformat(), "weight": kg * 1000,
+                         "timestampGMT": _demo_ms(d, hh, 5), "sourceType": "MANUAL"})
+        extras["weight"] = {"dailyWeightSummaries": [
+            {"summaryDate": r["calendarDate"], "allWeightMetrics": [r]} for r in rows]}
+
+    backfill = {}
+    for b in range(1, HISTORY_DAYS):
+        built = build_readiness([{"score": _DEMO_READINESS[b], "level": "MODERATE"}])
+        backfill[day(b)] = built["score"]
+    return summary, sleep, extras, window, backfill
+
+
+def cmd_demo(weight=False) -> int:
+    """A full synthetic payload, marked `"demo": true`. Reads and writes nothing.
+
+    `weight` mirrors fetch's `--weight`: the Service passes the flag when the
+    weight card is in the deck, and the demo follows the same one rule rather
+    than always inventing a weight nobody asked to see.
+    """
+    today = datetime.date.today()
+    summary, sleep, extras, window, backfill = _demo_raw(today, weight=weight)
+    payload = build_payload(summary, sleep, "demo", extras, weight_unit="kg")
+    rows, _ = _merge_history([], None, payload, today.isoformat(), window, burst=True)
+    _apply_readiness_backfill(rows, backfill)
+    payload["carried"] = []
+    payload["history"] = rows
+    payload["demo"] = True
+    return emit(payload)
 
 # ---- prefs -----------------------------------------------------------------
 #
