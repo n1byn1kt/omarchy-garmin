@@ -58,6 +58,8 @@ Item {
   property int _fetchGen: 0
   property int _runGen: 0
   property bool _pendingRefresh: false
+  // Whether the fetch in flight was started with `--weight` (QC #3).
+  property bool _runWeight: false
 
   // Gate the owner can use to decide, at each tick, whether this instance is
   // allowed to spawn the helper. The bar builds one widget per screen, and
@@ -140,6 +142,20 @@ Item {
     return false
   }
 
+  // Readiness backfill (Grok v0.5 QC #6): the per-day backfill calls only
+  // feed the readiness card's week strip, so without the card the fetch
+  // carries `--no-readiness-backfill`. An empty effective deck is the
+  // panel's built-in default, which has the readiness card — so empty
+  // counts as on (weight's default is off, so it needs no such case).
+  readonly property bool readinessEnabled: {
+    var raw = String(root.effectivePanelMetrics || "")
+    if (raw.replace(/^\s+|\s+$/g, "") === "") return true
+    var parts = raw.split(",")
+    for (var i = 0; i < parts.length; i++)
+      if (parts[i].replace(/^\s+|\s+$/g, "").toLowerCase() === "readiness") return true
+    return false
+  }
+
   // Weight (PR #1 port): the helper has no way to see the shell/manifest
   // deck on its own — prefs.json can only tell it about an override, never
   // about the fallback default — so this mirrors customEnabled exactly and
@@ -159,6 +175,12 @@ Item {
   readonly property int customOutputCap: 8192
 
   signal refreshed()
+
+  // "Send me the primary's current state" — raised once at startup and
+  // after a demo toggle (Grok v0.5 QC #5), never from adopt(): the owner
+  // answers it with publish(), and publish() lands in adopt(), so raising
+  // it there would loop the bar.
+  signal syncWanted()
 
   function poll() {
     var allowed = true
@@ -183,7 +205,11 @@ Item {
       // Still running for the mode the user just left: not killed (a fetch
       // mid-login is not something to SIGTERM on a whim), but queued behind,
       // so the new mode's answer follows as soon as the old one is dropped.
-      if (root._runGen !== root._fetchGen) root._pendingRefresh = true
+      // Same for a weight toggle (Grok v0.5 QC #3): the running fetch was
+      // built with the old `--weight`, so the card's new state gets a
+      // fetch of its own right after.
+      if (root._runGen !== root._fetchGen || root._runWeight !== root.weightEnabled)
+        root._pendingRefresh = true
       return
     }
     _stdout = ""
@@ -196,6 +222,8 @@ Item {
     var cmd = root.demoMode ? [root.helperPath, "demo"]
       : burst ? [root.helperPath, "fetch", "--week"] : [root.helperPath, "fetch"]
     if (root.weightEnabled) cmd.push("--weight")
+    if (!root.demoMode && !root.readinessEnabled) cmd.push("--no-readiness-backfill")
+    root._runWeight = root.weightEnabled
     fetchProcess.command = cmd
     // Fourteen sequential Garmin calls with the library's own retries can
     // outlast the 45s that a today-only fetch is allowed.
@@ -222,6 +250,10 @@ Item {
       // Belt to the generation counter's braces: a payload whose demo flag
       // disagrees with the mode we are in is never shown under it.
       if ((payload.demo === true) !== root.demoMode) return
+      // A `--weight` fetch that was already running when the card was
+      // switched off still answers with the series (Grok v0.5 QC #3); the
+      // card being gone is what counts, not the flag the fetch started with.
+      if (!root.weightEnabled && payload.weight) payload.weight = null
       root.payload = payload
       // A stale payload carries `detail` — the failing call's exception class
       // name, nothing attacker-chosen — so the tooltip can say *why* it's
@@ -554,6 +586,22 @@ Item {
   onCustomCommandChanged: root.runCustomIfPrimary()
   onCustomEnabledChanged: root.runCustomIfPrimary()
 
+  // The weight card switched on or off in edit mode (Grok v0.5 QC #3):
+  // `--weight` is only decided when refresh() builds the command, so
+  // without this the card waited for the next poll — forever in demo,
+  // where the poll timer is off. Same primary-only gate as the custom
+  // triggers above; peers get the result through publish()/adopt().
+  onWeightEnabledChanged: {
+    if (!root._started) return
+    var allowed = false
+    try {
+      allowed = root.canPoll()
+    } catch (e) {
+      allowed = false
+    }
+    if (allowed) root.refresh(false)
+  }
+
   // Take a result the primary instance already paid for. Deliberately silent —
   // emitting `refreshed()` here would bounce the payload straight back out
   // through the publisher and loop the bar.
@@ -566,9 +614,19 @@ Item {
   // that has not caught up with a toggle yet must not paint real numbers
   // under this screen's demo banner, or demo numbers into its real panel.
   // In demo the custom card is not adopted either (amendment 10).
+  //
+  // Ignored, but not kept around (Grok v0.5 QC #5): whatever this screen
+  // was showing belongs to the world the primary just left or is about to
+  // leave, so it goes too. The screen reads "Checking…" until the
+  // primary's matching payload is published, never the other world's.
   function adopt(state, payload, lastError, customCard, customError) {
     var isDemo = !!payload && payload.demo === true
-    if (payload && isDemo !== root.demoMode) return
+    if (payload && isDemo !== root.demoMode) {
+      root.payload = null
+      root.state = "loading"
+      root.lastError = ""
+      return
+    }
     root.payload = payload
     root.state = String(state)
     root.lastError = String(lastError || "")
@@ -595,14 +653,19 @@ Item {
     root.lastHint = ""
     root.customCard = null
     root.customError = ""
-    // Nothing is published here: every peer resets itself through its own
-    // onDemoModeChanged (the owner syncs them all), and the new payload is
-    // published when it lands.
     root.poll()
+    // Every peer resets itself through its own onDemoModeChanged, but a
+    // demo payload the primary published before this screen flipped was
+    // dropped by adopt(), and in demo no poll ever publishes again (Grok
+    // v0.5 QC #5). So each screen asks for a sync once it has flipped: on
+    // the primary that publishes the cleared state, on a peer it pulls
+    // whatever the primary now has.
+    root.syncWanted()
   }
 
-  // The dropped answer of a previous mode's fetch: nothing is applied, and
-  // the refresh that queued behind it runs now.
+  // The dropped answer of a previous mode's fetch (nothing is applied), or
+  // an applied one that a weight toggle queued behind: the refresh that
+  // was waiting runs now.
   function _finishStaleRun() {
     if (!root._pendingRefresh) return
     root._pendingRefresh = false
@@ -624,8 +687,14 @@ Item {
         root._finishStaleRun()
         return
       }
-      if (timedOut) return  // the watchdog already recorded the failure
+      if (timedOut) {  // the watchdog already recorded the failure
+        // Not re-run straight after a timeout; the next poll covers it.
+        root._pendingRefresh = false
+        return
+      }
       root.applyPayload(String(fetchStdout.text || root._stdout || ""))
+      // A weight toggle that arrived mid-fetch queued a refresh (QC #3).
+      root._finishStaleRun()
     }
   }
 
@@ -681,6 +750,18 @@ Item {
       // custom-card property triggers are allowed to fire.
       root._started = true
       root.poll()
+      // A screen whose bar came up after the primary's fetch landed (a
+      // monitor plugged in) has nothing to show until the next publish —
+      // in demo there is none (Grok v0.5 QC #5). Peers only: a primary
+      // that is itself new has nothing yet, and pushing that would blank
+      // screens that still hold good numbers until its fetch lands.
+      var primary = true
+      try {
+        primary = root.canPoll()
+      } catch (e) {
+        primary = true
+      }
+      if (!primary) root.syncWanted()
     }
   }
 }

@@ -118,6 +118,10 @@ BarWidget {
     // refreshed(), which can be up to pollMinutes away. publish() already
     // no-ops off the primary, so this is safe to call unconditionally.
     onCustomUpdated: root.publish()
+    // Startup and demo toggles (Grok v0.5 QC #5): the primary's current
+    // state is pushed to every peer. publish() only ever lands in adopt(),
+    // which emits nothing, so this cannot bounce back into a loop.
+    onSyncWanted: root.syncFromPrimary()
     // A pref written on this screen is a pref every screen's chip and panel
     // must honour, so the write fans out as a re-read rather than a copy.
     onPrefsWritten: root.broadcast("reloadPrefs")
@@ -182,6 +186,12 @@ BarWidget {
         items[i].acceptPayload(service.state, service.payload, service.lastError,
                                service.customCard, service.customError)
     }
+  }
+
+  function syncFromPrimary() {
+    var items = root.peers()
+    var primary = items.length > 0 && items[0] ? items[0] : root
+    if (typeof primary.publish === "function") primary.publish()
   }
 
   function acceptPayload(state, payload, lastError, customCard, customError) {

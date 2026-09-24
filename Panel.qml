@@ -1867,6 +1867,9 @@ Panel {
         else if (root.activityPage) {
           if (dy !== 0) root.activityMove(dy)
           else if (dx > 0) root.openActivity(root.activityCursor)
+          // The list's own back step, the same one Escape takes (Grok v0.5
+          // QC #7) — without it ←/h was accepted by the catcher and dropped.
+          else if (dx < 0) root.closeDetail()
         }
         else if (root.editMode) root.editMove(dx, dy)
       }
